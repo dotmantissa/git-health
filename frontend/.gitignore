@@ -1,7 +1,0 @@
-node_modules/
-dist/
-.vite/
-.vercel/
-.DS_Store
-*.log
-.vercel
