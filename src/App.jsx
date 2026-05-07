@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Contract, JsonRpcProvider } from 'ethers';
+import { Contract } from 'ethers';
 import WalletBar from './components/WalletBar';
 import RepoInput from './components/RepoInput';
 import ScoreGauge from './components/ScoreGauge';
 import HistoryList from './components/HistoryList';
-import { ABI, CHAIN_ID, CONTRACT_ADDRESS, RPC_URL } from './constants';
+import { ABI, CHAIN_ID, CONTRACT_ADDRESS } from './constants';
 import { useWallet } from './hooks/useWallet';
 
 function truncateError(message) {
@@ -14,19 +14,6 @@ function truncateError(message) {
 
 function isValidGithubUrl(url) {
   return url.startsWith('https://github.com/');
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isTransientReadError(error) {
-  const msg = String(error?.message || '').toLowerCase();
-  return (
-    msg.includes('missing revert data') ||
-    msg.includes('action="call"') ||
-    msg.includes('execution reverted')
-  );
 }
 
 export default function App() {
@@ -51,7 +38,6 @@ export default function App() {
   const [loadingStep, setLoadingStep] = useState(0);
   const [selectedEntry, setSelectedEntry] = useState(null);
   const [history, setHistory] = useState([]);
-  const [readProvider] = useState(() => new JsonRpcProvider(RPC_URL));
 
   useEffect(() => {
     if (!inlineError && !walletError) return undefined;
@@ -61,14 +47,6 @@ export default function App() {
     }, 6000);
     return () => clearTimeout(timer);
   }, [inlineError, walletError, clearError]);
-
-  useEffect(() => {
-    if (!loading) return undefined;
-    const interval = setInterval(() => {
-      setLoadingStep((prev) => (prev + 1) % 3);
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [loading]);
 
   const gateError = useMemo(() => {
     if (!isConnected) return 'Connect your wallet before interacting with the contract.';
@@ -105,27 +83,6 @@ export default function App() {
     setSelectedEntry(entry);
   };
 
-  const resolveScoreAfterAnalyze = async (url) => {
-    const maxAttempts = 45;
-    const delayMs = 2000;
-    const readContract = new Contract(CONTRACT_ADDRESS, ABI, readProvider);
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        const score = await readContract.get_score(url);
-        return Number(score);
-      } catch (error) {
-        const isLastAttempt = attempt === maxAttempts;
-        if (!isTransientReadError(error) || isLastAttempt) {
-          throw error;
-        }
-        await sleep(delayMs);
-      }
-    }
-
-    throw new Error('Timed out while finalizing score from chain state');
-  };
-
   const handleAnalyze = async () => {
     setInlineError('');
     clearError();
@@ -136,14 +93,24 @@ export default function App() {
       return;
     }
 
+    let statusInterval;
     try {
       setLoading(true);
       setLoadingStep(0);
+      statusInterval = setInterval(() => {
+        setLoadingStep((prev) => (prev + 1) % 3);
+      }, 4000);
 
+      setLoadingStep(0);
       const contract = new Contract(CONTRACT_ADDRESS, ABI, signer);
       const tx = await contract.analyze_repo(repoUrl.trim());
+      setLoadingStep(1);
       await tx.wait();
-      const score = await resolveScoreAfterAnalyze(repoUrl.trim());
+      setLoadingStep(2);
+
+      const readContract = new Contract(CONTRACT_ADDRESS, ABI, provider);
+      const rawScore = await readContract.get_score(repoUrl.trim());
+      const score = Number(rawScore);
 
       const entry = {
         url: repoUrl.trim(),
@@ -152,17 +119,18 @@ export default function App() {
       };
       pushHistory(entry);
     } catch (error) {
-      if (error?.code === 4001) {
-        setInlineError('Transaction rejected by user');
+      if (error?.code === 4001 || error?.code === 'ACTION_REJECTED') {
+        setInlineError('Transaction rejected.');
       } else if (
         String(error?.message || '').toLowerCase().includes('network') ||
         String(error?.message || '').toLowerCase().includes('failed to fetch')
       ) {
         setInlineError('RPC connection failed — is GenLayer Studio running?');
       } else {
-        setInlineError(truncateError(error?.message));
+        setInlineError(truncateError(error?.message || 'Transaction failed.'));
       }
     } finally {
+      clearInterval(statusInterval);
       setLoading(false);
     }
   };
@@ -178,7 +146,7 @@ export default function App() {
     }
 
     try {
-      const contract = new Contract(CONTRACT_ADDRESS, ABI, readProvider);
+      const contract = new Contract(CONTRACT_ADDRESS, ABI, provider);
       const score = await contract.get_score(repoUrl.trim());
       const entry = {
         url: repoUrl.trim(),

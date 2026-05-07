@@ -1,8 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
-import { JsonRpcProvider } from 'ethers';
-import { CHAIN_ID, RPC_URL } from '../constants';
-
-const RPC_SESSION_KEY = 'githealth_rpc_connected';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { BrowserProvider } from 'ethers';
+import { CHAIN_ID, CHAIN_ID_HEX, NETWORK_NAME } from '../constants';
 
 export function useWallet() {
   const [provider, setProvider] = useState(null);
@@ -13,12 +11,27 @@ export function useWallet() {
   const [chainId, setChainId] = useState(null);
   const [walletError, setWalletError] = useState('');
 
+  const chainChangedRef = useRef(null);
+  const accountsChangedRef = useRef(null);
+
   const clearError = useCallback(() => {
     setWalletError('');
   }, []);
 
+  const removeListeners = useCallback(() => {
+    if (!window.ethereum) return;
+    if (chainChangedRef.current) {
+      window.ethereum.removeListener('chainChanged', chainChangedRef.current);
+      chainChangedRef.current = null;
+    }
+    if (accountsChangedRef.current) {
+      window.ethereum.removeListener('accountsChanged', accountsChangedRef.current);
+      accountsChangedRef.current = null;
+    }
+  }, []);
+
   const disconnect = useCallback(() => {
-    localStorage.removeItem(RPC_SESSION_KEY);
+    removeListeners();
     setProvider(null);
     setSigner(null);
     setAddress(null);
@@ -26,73 +39,115 @@ export function useWallet() {
     setWrongNetwork(false);
     setChainId(null);
     setWalletError('');
-  }, []);
-
-  const connectWithMode = useCallback(async (silent = false) => {
-    clearError();
-
-    try {
-      const rpcProvider = new JsonRpcProvider(RPC_URL);
-      const network = await rpcProvider.getNetwork();
-      const currentChainId = Number(network.chainId);
-
-      setProvider(rpcProvider);
-      setChainId(currentChainId);
-
-      if (currentChainId !== CHAIN_ID) {
-        setWrongNetwork(true);
-        setIsConnected(false);
-        if (!silent) {
-          setWalletError('Wrong network. RPC must point to GenLayer Studio (Chain ID 61999).');
-        }
-        return;
-      }
-
-      const accounts = await rpcProvider.send('eth_accounts', []);
-      if (!accounts || accounts.length === 0) {
-        setWrongNetwork(false);
-        setIsConnected(false);
-        setSigner(null);
-        setAddress(null);
-        if (!silent) {
-          setWalletError('No RPC account available for signing. Start GenLayer Studio with an unlocked account.');
-        }
-        return;
-      }
-
-      const rpcSigner = await rpcProvider.getSigner(accounts[0]);
-      const signerAddress = await rpcSigner.getAddress();
-
-      setSigner(rpcSigner);
-      setAddress(signerAddress);
-      setWrongNetwork(false);
-      setIsConnected(true);
-      localStorage.setItem(RPC_SESSION_KEY, '1');
-    } catch (error) {
-      setIsConnected(false);
-      setWrongNetwork(false);
-      setSigner(null);
-      setAddress(null);
-      if (!silent) {
-        setWalletError(error?.message || 'RPC connection failed — is GenLayer Studio running?');
-      }
-    }
-  }, [clearError]);
+  }, [removeListeners]);
 
   const connect = useCallback(async () => {
-    await connectWithMode(false);
-  }, [connectWithMode]);
+    clearError();
+
+    if (!window.ethereum) {
+      setWalletError('No wallet detected. Install MetaMask or a compatible wallet.');
+      return;
+    }
+
+    try {
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      if (!accounts || accounts.length === 0) {
+        throw new Error('No accounts returned');
+      }
+
+      const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+
+      if (parseInt(currentChainId, 16) !== CHAIN_ID) {
+        try {
+          await window.ethereum.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: CHAIN_ID_HEX }]
+          });
+        } catch (switchError) {
+          if (switchError?.code === 4902) {
+            await window.ethereum.request({
+              method: 'wallet_addEthereumChain',
+              params: [
+                {
+                  chainId: CHAIN_ID_HEX,
+                  chainName: NETWORK_NAME,
+                  nativeCurrency: {
+                    name: 'GEN',
+                    symbol: 'GEN',
+                    decimals: 18
+                  },
+                  rpcUrls: ['http://127.0.0.1:4000/api']
+                }
+              ]
+            });
+          } else {
+            setWalletError('Switch to GenLayer Studio network to continue.');
+            setWrongNetwork(true);
+            return;
+          }
+        }
+      }
+
+      const nextProvider = new BrowserProvider(window.ethereum);
+      const nextSigner = await nextProvider.getSigner();
+      const nextAddress = await nextSigner.getAddress();
+      const confirmedNetwork = await nextProvider.getNetwork();
+
+      if (Number(confirmedNetwork.chainId) !== CHAIN_ID) {
+        setWalletError('Wrong network. GenLayer Studio (61999) required.');
+        setWrongNetwork(true);
+        return;
+      }
+
+      const handleChainChanged = () => {
+        window.location.reload();
+      };
+
+      const handleAccountsChanged = (nextAccounts) => {
+        if (!nextAccounts || nextAccounts.length === 0) {
+          disconnect();
+        } else {
+          const newProvider = new BrowserProvider(window.ethereum);
+          newProvider.getSigner().then((newSigner) => {
+            setProvider(newProvider);
+            setSigner(newSigner);
+            setAddress(nextAccounts[0]);
+          });
+        }
+      };
+
+      removeListeners();
+      chainChangedRef.current = handleChainChanged;
+      accountsChangedRef.current = handleAccountsChanged;
+      window.ethereum.on('chainChanged', handleChainChanged);
+      window.ethereum.on('accountsChanged', handleAccountsChanged);
+
+      setProvider(nextProvider);
+      setSigner(nextSigner);
+      setAddress(nextAddress);
+      setChainId(Number(confirmedNetwork.chainId));
+      setWrongNetwork(false);
+      setIsConnected(true);
+      setWalletError('');
+    } catch (error) {
+      if (error?.code === 4001) {
+        setWalletError('Switch to GenLayer Studio network to continue.');
+      } else {
+        setWalletError(error?.message || 'Failed to connect wallet');
+      }
+      setWrongNetwork(true);
+    }
+  }, [clearError, disconnect, removeListeners]);
 
   const switchToGenLayer = useCallback(async () => {
-    await connectWithMode(false);
-  }, [connectWithMode]);
+    await connect();
+  }, [connect]);
 
   useEffect(() => {
-    const shouldRestore = localStorage.getItem(RPC_SESSION_KEY) === '1';
-    if (shouldRestore) {
-      connectWithMode(true);
-    }
-  }, [connectWithMode]);
+    return () => {
+      removeListeners();
+    };
+  }, [removeListeners]);
 
   return {
     provider,
