@@ -25,6 +25,56 @@ class GitHealth(gl.Contract):
         commits and open issues, and updates the state.
         """
 
+        def compute_score(parsed: dict) -> int:
+            score = 100
+
+            last_commit_text = str(parsed.get("last_commit_text", "")).strip().lower()
+            recency_bucket = str(parsed.get("commit_recency_bucket", "")).strip().lower()
+            confidence = str(parsed.get("confidence", "")).strip().lower()
+            issues_count_raw = parsed.get("open_issues_count", 0)
+
+            # Penalize uncertainty by default if commit recency is missing or ambiguous.
+            if not last_commit_text or recency_bucket not in {
+                "within_1_month",
+                "over_1_month",
+                "over_6_months",
+                "over_1_year",
+            }:
+                score -= 10
+            elif recency_bucket == "over_1_month":
+                score -= 10
+            elif recency_bucket == "over_6_months":
+                score -= 40
+            elif recency_bucket == "over_1_year":
+                score -= 60
+
+            try:
+                issues_count = int(issues_count_raw)
+            except Exception:
+                issues_count = 0
+
+            if issues_count < 0:
+                issues_count = 0
+            issue_deduction = min(20, issues_count // 10)
+            score -= issue_deduction
+
+            if score < 0:
+                score = 0
+
+            # Require explicit commit evidence for a perfect score.
+            if score == 100 and not last_commit_text:
+                score = 90
+
+            # Additional optimistic clamp if commit evidence is missing.
+            if not last_commit_text and score > 90:
+                score = 90
+
+            # Low confidence also prevents optimistic perfect scoring.
+            if confidence == "low" and score > 90:
+                score = 90
+
+            return score
+
         def get_repo_health():
             # 1. Fetch the repo page
             try:
@@ -37,35 +87,48 @@ class GitHealth(gl.Contract):
 
             # 2. LLM Analysis Task
             task = f"""
-            You are a Code Repository Auditor. Analyze the text from this GitHub page.
-            
-            Goal: Calculate a 'Health Score' (0-100) based on:
-            1. Recency of the 'Last Commit' (Visible in the file list header).
-            2. Count of 'Open Issues' (Visible in the tabs).
+            You are a Code Repository Auditor.
+            Extract structured evidence from this GitHub page text.
 
-            Rubric:
-            - Start with 100 points.
-            - If last commit was > 1 month ago, deduct 10 points.
-            - If last commit was > 6 months ago, deduct 40 points.
-            - If last commit was > 1 year ago, deduct 60 points.
-            - Deduct 1 point for every 10 Open Issues (max deduction 20).
-            - Minimum score is 0.
+            Rules:
+            - Only use information explicitly visible in the provided text.
+            - If a field is missing or ambiguous, return empty text and low confidence.
+            - Do not infer hidden values.
+
+            Return ONLY valid JSON with this exact schema:
+            {{
+              "last_commit_text": "verbatim commit recency evidence or empty string",
+              "commit_recency_bucket": "within_1_month|over_1_month|over_6_months|over_1_year|unknown",
+              "open_issues_text": "verbatim open issues evidence or empty string",
+              "open_issues_count": 0,
+              "confidence": "high|medium|low",
+              "reasoning": "short rationale for extracted evidence"
+            }}
 
             Repo Content Snippet:
-            {web_content[:6000]} 
-
-            Respond using ONLY the following JSON format:
-            {{
-                "reasoning": str,       // Explain your deduction math
-                "health_score": int     // Final score 0-100
-            }}
+            {web_content[:6000]}
             """
 
             # 3. Execute Prompt
             result_raw = gl.nondet.exec_prompt(task)
             cleaned = result_raw.replace("```json", "").replace("```", "").strip()
-            print(f"LLM Assessment: {cleaned}")
-            return cleaned
+            print(f"LLM Extraction: {cleaned}")
+
+            try:
+                extracted = json.loads(cleaned)
+            except Exception:
+                extracted = {
+                    "last_commit_text": "",
+                    "commit_recency_bucket": "unknown",
+                    "open_issues_text": "",
+                    "open_issues_count": 0,
+                    "confidence": "low",
+                    "reasoning": "Extraction parse failed",
+                }
+
+            score = compute_score(extracted)
+            extracted["health_score"] = score
+            return json.dumps(extracted)
 
         # 4. Comparative Consensus
         # FIX: Passed as a positional argument (removed 'criteria=')
