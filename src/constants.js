@@ -3,6 +3,8 @@ export const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID);
 export const CHAIN_ID_HEX = '0xF22F';
 export const RPC_URL = 'http://127.0.0.1:4000/api';
 export const NETWORK_NAME = 'GenLayer Studio';
+export const TX_POLL_INTERVAL = 3000;
+export const TX_POLL_RETRIES = 200;
 
 export const ABI = [
   {

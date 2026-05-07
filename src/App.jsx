@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Contract } from 'ethers';
 import WalletBar from './components/WalletBar';
 import RepoInput from './components/RepoInput';
 import ScoreGauge from './components/ScoreGauge';
 import HistoryList from './components/HistoryList';
-import { ABI, CHAIN_ID, CONTRACT_ADDRESS } from './constants';
+import { CHAIN_ID } from './constants';
 import { useWallet } from './hooks/useWallet';
+import { analyzeRepo, getCachedScore } from './lib/genLayerClient';
 
 function truncateError(message) {
   if (!message) return 'Unknown error';
@@ -35,7 +35,7 @@ export default function App() {
   const [validationError, setValidationError] = useState('');
   const [inlineError, setInlineError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [loadingStep, setLoadingStep] = useState(0);
+  const [statusMessage, setStatusMessage] = useState(null);
   const [selectedEntry, setSelectedEntry] = useState(null);
   const [history, setHistory] = useState([]);
 
@@ -59,7 +59,7 @@ export default function App() {
     setValidationError('');
     setInlineError('');
     setLoading(false);
-    setLoadingStep(0);
+    setStatusMessage(null);
     setSelectedEntry(null);
     setHistory([]);
   };
@@ -92,25 +92,16 @@ export default function App() {
       setInlineError(gateError);
       return;
     }
+    if (!signer || !provider || !address) {
+      setInlineError('Connect your wallet before interacting with the contract.');
+      return;
+    }
 
-    let statusInterval;
     try {
       setLoading(true);
-      setLoadingStep(0);
-      statusInterval = setInterval(() => {
-        setLoadingStep((prev) => (prev + 1) % 3);
-      }, 4000);
+      setStatusMessage('Submitting transaction…');
 
-      setLoadingStep(0);
-      const contract = new Contract(CONTRACT_ADDRESS, ABI, signer);
-      const tx = await contract.analyze_repo(repoUrl.trim());
-      setLoadingStep(1);
-      await tx.wait();
-      setLoadingStep(2);
-
-      const readContract = new Contract(CONTRACT_ADDRESS, ABI, provider);
-      const rawScore = await readContract.get_score(repoUrl.trim());
-      const score = Number(rawScore);
+      const score = await analyzeRepo(address, repoUrl.trim(), setStatusMessage);
 
       const entry = {
         url: repoUrl.trim(),
@@ -121,17 +112,12 @@ export default function App() {
     } catch (error) {
       if (error?.code === 4001 || error?.code === 'ACTION_REJECTED') {
         setInlineError('Transaction rejected.');
-      } else if (
-        String(error?.message || '').toLowerCase().includes('network') ||
-        String(error?.message || '').toLowerCase().includes('failed to fetch')
-      ) {
-        setInlineError('RPC connection failed — is GenLayer Studio running?');
       } else {
         setInlineError(truncateError(error?.message || 'Transaction failed.'));
       }
     } finally {
-      clearInterval(statusInterval);
       setLoading(false);
+      setStatusMessage(null);
     }
   };
 
@@ -144,25 +130,26 @@ export default function App() {
       setInlineError(gateError);
       return;
     }
+    if (!address) {
+      setInlineError('Connect your wallet before interacting with the contract.');
+      return;
+    }
 
     try {
-      const contract = new Contract(CONTRACT_ADDRESS, ABI, provider);
-      const score = await contract.get_score(repoUrl.trim());
+      setLoading(true);
+      setStatusMessage('Reading result…');
+      const score = await getCachedScore(address, repoUrl.trim());
       const entry = {
         url: repoUrl.trim(),
-        score: Number(score),
+        score,
         timestamp: new Date().toISOString()
       };
       pushHistory(entry);
     } catch (error) {
-      if (
-        String(error?.message || '').toLowerCase().includes('network') ||
-        String(error?.message || '').toLowerCase().includes('failed to fetch')
-      ) {
-        setInlineError('RPC connection failed — is GenLayer Studio running?');
-      } else {
-        setInlineError(truncateError(error?.message));
-      }
+      setInlineError(truncateError(error?.message || 'Read failed.'));
+    } finally {
+      setLoading(false);
+      setStatusMessage(null);
     }
   };
 
@@ -195,7 +182,7 @@ export default function App() {
           onGetCached={handleGetCached}
           loading={loading}
           validationError={validationError}
-          loadingStep={loadingStep}
+          statusMessage={statusMessage}
         />
 
         {activeError ? <p className="error-banner">{activeError}</p> : null}

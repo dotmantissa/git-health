@@ -1,9 +1,3 @@
-const statusSteps = [
-  'Submitting transaction…',
-  'Waiting for LLM consensus…',
-  'Finalizing score…'
-];
-
 export default function RepoInput({
   repoUrl,
   onChange,
@@ -11,7 +5,7 @@ export default function RepoInput({
   onGetCached,
   loading,
   validationError,
-  loadingStep
+  statusMessage
 }) {
   return (
     <section className={`card repo-card ${loading ? 'is-loading' : ''}`}>
@@ -48,7 +42,7 @@ export default function RepoInput({
         </button>
       </div>
 
-      {loading ? <p className="status-inline">{statusSteps[loadingStep % statusSteps.length]}</p> : null}
+      {loading && statusMessage ? <p className="status-inline">{statusMessage}</p> : null}
     </section>
   );
 }
