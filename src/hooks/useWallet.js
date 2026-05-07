@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { BrowserProvider } from 'ethers';
 import { CHAIN_ID, CHAIN_ID_HEX, NETWORK_NAME, RPC_URL } from '../constants';
 
+const WALLET_SESSION_KEY = 'githealth_wallet_connected';
+
 export function useWallet() {
   const [provider, setProvider] = useState(null);
   const [signer, setSigner] = useState(null);
@@ -18,11 +20,21 @@ export function useWallet() {
     setWalletError('');
   }, []);
 
-  const disconnect = useCallback(() => {
-    if (window.ethereum && chainChangedRef.current && accountsChangedRef.current) {
+  const removeListeners = useCallback(() => {
+    if (!window.ethereum) return;
+    if (chainChangedRef.current) {
       window.ethereum.removeListener('chainChanged', chainChangedRef.current);
+    }
+    if (accountsChangedRef.current) {
       window.ethereum.removeListener('accountsChanged', accountsChangedRef.current);
     }
+    chainChangedRef.current = null;
+    accountsChangedRef.current = null;
+  }, []);
+
+  const disconnect = useCallback(() => {
+    removeListeners();
+    localStorage.removeItem(WALLET_SESSION_KEY);
 
     setProvider(null);
     setSigner(null);
@@ -31,7 +43,7 @@ export function useWallet() {
     setWrongNetwork(false);
     setChainId(null);
     setWalletError('');
-  }, []);
+  }, [removeListeners]);
 
   const ensureCorrectNetwork = useCallback(async () => {
     try {
@@ -77,16 +89,68 @@ export function useWallet() {
     }
   }, []);
 
-  const connect = useCallback(async () => {
+  const attachListeners = useCallback(
+    (onDisconnect) => {
+      if (!window.ethereum) return;
+      removeListeners();
+
+      const onChainChanged = () => {
+        window.location.reload();
+      };
+
+      const onAccountsChanged = async (accounts) => {
+        if (!accounts || accounts.length === 0) {
+          onDisconnect();
+          return;
+        }
+
+        try {
+          const updatedProvider = new BrowserProvider(window.ethereum);
+          const updatedNetwork = await updatedProvider.getNetwork();
+          const updatedChainId = Number(updatedNetwork.chainId);
+          const updatedSigner = await updatedProvider.getSigner();
+          const updatedAddress = await updatedSigner.getAddress();
+
+          setProvider(updatedProvider);
+          setSigner(updatedSigner);
+          setAddress(updatedAddress);
+          setChainId(updatedChainId);
+          setWrongNetwork(updatedChainId !== CHAIN_ID);
+          setIsConnected(true);
+        } catch (error) {
+          setWalletError(error?.message || 'Failed to update wallet account');
+        }
+      };
+
+      chainChangedRef.current = onChainChanged;
+      accountsChangedRef.current = onAccountsChanged;
+      window.ethereum.on('chainChanged', onChainChanged);
+      window.ethereum.on('accountsChanged', onAccountsChanged);
+    },
+    [removeListeners]
+  );
+
+  const connectWithMode = useCallback(async (silent = false) => {
     clearError();
 
     if (!window.ethereum) {
-      setWalletError('No wallet detected. Install MetaMask or a compatible wallet.');
+      if (!silent) {
+        setWalletError('No wallet detected. Install MetaMask or a compatible wallet.');
+      }
       return;
     }
 
     try {
-      await window.ethereum.request({ method: 'eth_requestAccounts' });
+      const accounts = await window.ethereum.request({
+        method: silent ? 'eth_accounts' : 'eth_requestAccounts'
+      });
+      if (!accounts || accounts.length === 0) {
+        if (!silent) {
+          setWalletError('No account connected in wallet.');
+        }
+        disconnect();
+        return;
+      }
 
       const browserProvider = new BrowserProvider(window.ethereum);
       const network = await browserProvider.getNetwork();
@@ -105,7 +169,9 @@ export function useWallet() {
 
       if (finalChainId !== CHAIN_ID) {
         setWrongNetwork(true);
-        setWalletError('Wrong network. Switch to GenLayer Studio to continue.');
+        if (!silent) {
+          setWalletError('Wrong network. Switch to GenLayer Studio to continue.');
+        }
         return;
       }
 
@@ -118,38 +184,18 @@ export function useWallet() {
       setChainId(finalChainId);
       setWrongNetwork(false);
       setIsConnected(true);
-
-      const onChainChanged = () => {
-        window.location.reload();
-      };
-
-      const onAccountsChanged = async (accounts) => {
-        if (!accounts || accounts.length === 0) {
-          disconnect();
-          return;
-        }
-
-        const updatedProvider = new BrowserProvider(window.ethereum);
-        const updatedNetwork = await updatedProvider.getNetwork();
-        const updatedChainId = Number(updatedNetwork.chainId);
-        const updatedSigner = await updatedProvider.getSigner();
-
-        setProvider(updatedProvider);
-        setSigner(updatedSigner);
-        setAddress(accounts[0]);
-        setChainId(updatedChainId);
-        setWrongNetwork(updatedChainId !== CHAIN_ID);
-      };
-
-      chainChangedRef.current = onChainChanged;
-      accountsChangedRef.current = onAccountsChanged;
-
-      window.ethereum.on('chainChanged', onChainChanged);
-      window.ethereum.on('accountsChanged', onAccountsChanged);
+      localStorage.setItem(WALLET_SESSION_KEY, '1');
+      attachListeners(disconnect);
     } catch (error) {
-      setWalletError(error?.message || 'Failed to connect wallet');
+      if (!silent) {
+        setWalletError(error?.message || 'Failed to connect wallet');
+      }
     }
-  }, [clearError, disconnect, ensureCorrectNetwork]);
+  }, [attachListeners, clearError, disconnect, ensureCorrectNetwork]);
+
+  const connect = useCallback(async () => {
+    await connectWithMode(false);
+  }, [connectWithMode]);
 
   const switchToGenLayer = useCallback(async () => {
     clearError();
@@ -167,6 +213,7 @@ export function useWallet() {
         setAddress(refreshedAddress);
         setChainId(refreshedChainId);
         setWrongNetwork(false);
+        setIsConnected(true);
       }
     } catch (error) {
       setWalletError(error?.message || 'Failed to switch network');
@@ -174,13 +221,15 @@ export function useWallet() {
   }, [clearError, ensureCorrectNetwork, isConnected]);
 
   useEffect(() => {
+    const shouldRestore = localStorage.getItem(WALLET_SESSION_KEY) === '1';
+    if (shouldRestore) {
+      connectWithMode(true);
+    }
+
     return () => {
-      if (window.ethereum && chainChangedRef.current && accountsChangedRef.current) {
-        window.ethereum.removeListener('chainChanged', chainChangedRef.current);
-        window.ethereum.removeListener('accountsChanged', accountsChangedRef.current);
-      }
+      removeListeners();
     };
-  }, []);
+  }, [connectWithMode, removeListeners]);
 
   return {
     provider,
