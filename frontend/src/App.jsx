@@ -16,6 +16,19 @@ function isValidGithubUrl(url) {
   return url.startsWith('https://github.com/');
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientReadError(error) {
+  const msg = String(error?.message || '').toLowerCase();
+  return (
+    msg.includes('missing revert data') ||
+    msg.includes('action="call"') ||
+    msg.includes('execution reverted')
+  );
+}
+
 export default function App() {
   const {
     provider,
@@ -91,6 +104,26 @@ export default function App() {
     setSelectedEntry(entry);
   };
 
+  const resolveScoreAfterAnalyze = async (contract, url) => {
+    const maxAttempts = 20;
+    const delayMs = 2000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const score = await contract.get_score(url);
+        return Number(score);
+      } catch (error) {
+        const isLastAttempt = attempt === maxAttempts;
+        if (!isTransientReadError(error) || isLastAttempt) {
+          throw error;
+        }
+        await sleep(delayMs);
+      }
+    }
+
+    throw new Error('Timed out while finalizing score from chain state');
+  };
+
   const handleAnalyze = async () => {
     setInlineError('');
     clearError();
@@ -108,11 +141,11 @@ export default function App() {
       const contract = new Contract(CONTRACT_ADDRESS, ABI, signer);
       const tx = await contract.analyze_repo(repoUrl.trim());
       await tx.wait();
-      const score = await contract.get_score(repoUrl.trim());
+      const score = await resolveScoreAfterAnalyze(contract, repoUrl.trim());
 
       const entry = {
         url: repoUrl.trim(),
-        score: Number(score),
+        score,
         timestamp: new Date().toISOString()
       };
       pushHistory(entry);

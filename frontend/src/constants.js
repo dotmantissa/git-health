@@ -1,9 +1,8 @@
-export const CHAIN_ID = 61999;
+export const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS;
+export const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID);
 export const CHAIN_ID_HEX = '0xF22F';
-export const RPC_URL = 'http://localhost:4000/api';
+export const RPC_URL = import.meta.env.VITE_RPC_URL;
 export const NETWORK_NAME = 'GenLayer Studio';
-
-export const CONTRACT_ADDRESS = '0x4A80762ebE1BC926b1Bee3eB9e388ae55f4Cf0Ee';
 
 export const ABI = [
   {
