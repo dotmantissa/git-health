@@ -65,11 +65,7 @@ class GitHealth(gl.Contract):
             if score == 100 and not last_commit_text:
                 score = 90
 
-            # Additional optimistic clamp if commit evidence is missing.
-            if not last_commit_text and score > 90:
-                score = 90
-
-            # Low confidence also prevents optimistic perfect scoring.
+            # Low confidence prevents optimistic high scoring.
             if confidence == "low" and score > 90:
                 score = 90
 
@@ -94,6 +90,10 @@ class GitHealth(gl.Contract):
             - Only use information explicitly visible in the provided text.
             - If a field is missing or ambiguous, return empty text and low confidence.
             - Do not infer hidden values.
+            - Prefer explicit recency snippets like:
+              "committed X days ago", "updated on Month Day, Year",
+              "Latest commit", "last commit".
+            - For open issues, prefer visible tab counts near "Issues".
 
             Return ONLY valid JSON with this exact schema:
             {{
@@ -126,8 +126,59 @@ class GitHealth(gl.Contract):
                     "reasoning": "Extraction parse failed",
                 }
 
+            # Focused second pass for commit recency when initial extraction is weak.
+            if (
+                not str(extracted.get("last_commit_text", "")).strip()
+                or str(extracted.get("commit_recency_bucket", "")).strip().lower()
+                == "unknown"
+            ):
+                recency_task = f"""
+                Extract ONLY commit recency evidence from this GitHub page text.
+                Use exact visible phrasing where possible.
+
+                Return ONLY valid JSON:
+                {{
+                  "last_commit_text": "verbatim recency phrase or empty string",
+                  "commit_recency_bucket": "within_1_month|over_1_month|over_6_months|over_1_year|unknown",
+                  "confidence": "high|medium|low"
+                }}
+
+                Repo Content Snippet:
+                {web_content[:6000]}
+                """
+                recency_raw = gl.nondet.exec_prompt(recency_task)
+                recency_cleaned = (
+                    recency_raw.replace("```json", "").replace("```", "").strip()
+                )
+                print(f"LLM Recency Extraction: {recency_cleaned}")
+
+                try:
+                    recency_extracted = json.loads(recency_cleaned)
+                    if str(recency_extracted.get("last_commit_text", "")).strip():
+                        extracted["last_commit_text"] = recency_extracted.get(
+                            "last_commit_text", ""
+                        )
+                    if str(recency_extracted.get("commit_recency_bucket", "")).strip():
+                        extracted["commit_recency_bucket"] = recency_extracted.get(
+                            "commit_recency_bucket", "unknown"
+                        )
+                    # Keep the lower confidence between passes.
+                    existing_conf = str(extracted.get("confidence", "low")).lower()
+                    second_conf = str(recency_extracted.get("confidence", "low")).lower()
+                    if existing_conf == "low" or second_conf == "low":
+                        extracted["confidence"] = "low"
+                    elif existing_conf == "medium" or second_conf == "medium":
+                        extracted["confidence"] = "medium"
+                    else:
+                        extracted["confidence"] = "high"
+                except Exception:
+                    pass
+
             score = compute_score(extracted)
             extracted["health_score"] = score
+            extracted["evidence_missing"] = not bool(
+                str(extracted.get("last_commit_text", "")).strip()
+            )
             return json.dumps(extracted)
 
         # 4. Comparative Consensus
