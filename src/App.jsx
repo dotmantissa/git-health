@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Contract } from 'ethers';
+import { Contract, JsonRpcProvider } from 'ethers';
 import WalletBar from './components/WalletBar';
 import RepoInput from './components/RepoInput';
 import ScoreGauge from './components/ScoreGauge';
 import HistoryList from './components/HistoryList';
-import { ABI, CHAIN_ID, CONTRACT_ADDRESS } from './constants';
+import { ABI, CHAIN_ID, CONTRACT_ADDRESS, RPC_URL } from './constants';
 import { useWallet } from './hooks/useWallet';
 
 function truncateError(message) {
@@ -51,6 +51,7 @@ export default function App() {
   const [loadingStep, setLoadingStep] = useState(0);
   const [selectedEntry, setSelectedEntry] = useState(null);
   const [history, setHistory] = useState([]);
+  const [readProvider] = useState(() => new JsonRpcProvider(RPC_URL));
 
   useEffect(() => {
     if (!inlineError && !walletError) return undefined;
@@ -104,13 +105,14 @@ export default function App() {
     setSelectedEntry(entry);
   };
 
-  const resolveScoreAfterAnalyze = async (contract, url) => {
-    const maxAttempts = 20;
+  const resolveScoreAfterAnalyze = async (url) => {
+    const maxAttempts = 45;
     const delayMs = 2000;
+    const readContract = new Contract(CONTRACT_ADDRESS, ABI, readProvider);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        const score = await contract.get_score(url);
+        const score = await readContract.get_score(url);
         return Number(score);
       } catch (error) {
         const isLastAttempt = attempt === maxAttempts;
@@ -141,7 +143,7 @@ export default function App() {
       const contract = new Contract(CONTRACT_ADDRESS, ABI, signer);
       const tx = await contract.analyze_repo(repoUrl.trim());
       await tx.wait();
-      const score = await resolveScoreAfterAnalyze(contract, repoUrl.trim());
+      const score = await resolveScoreAfterAnalyze(repoUrl.trim());
 
       const entry = {
         url: repoUrl.trim(),
@@ -176,7 +178,7 @@ export default function App() {
     }
 
     try {
-      const contract = new Contract(CONTRACT_ADDRESS, ABI, provider);
+      const contract = new Contract(CONTRACT_ADDRESS, ABI, readProvider);
       const score = await contract.get_score(repoUrl.trim());
       const entry = {
         url: repoUrl.trim(),
