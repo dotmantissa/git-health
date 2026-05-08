@@ -1,4 +1,4 @@
-# v0.1.0
+# v0.2.0
 # { "Depends": "py-genlayer:latest" }
 
 import json
@@ -32,6 +32,9 @@ class GitHealth(gl.Contract):
             recency_bucket = str(parsed.get("commit_recency_bucket", "")).strip().lower()
             confidence = str(parsed.get("confidence", "")).strip().lower()
             issues_count_raw = parsed.get("open_issues_count", 0)
+            has_readme = bool(parsed.get("has_readme", False))
+            has_ci = bool(parsed.get("has_ci", False))
+            has_license = bool(parsed.get("has_license", False))
 
             # Penalize uncertainty by default if commit recency is missing or ambiguous.
             if not last_commit_text or recency_bucket not in {
@@ -57,6 +60,14 @@ class GitHealth(gl.Contract):
                 issues_count = 0
             issue_deduction = min(20, issues_count // 10)
             score -= issue_deduction
+
+            # Penalize missing repository trust signals.
+            if not has_readme:
+                score -= 5
+            if not has_ci:
+                score -= 5
+            if not has_license:
+                score -= 5
 
             if score < 0:
                 score = 0
@@ -101,6 +112,12 @@ class GitHealth(gl.Contract):
               "commit_recency_bucket": "within_1_month|over_1_month|over_6_months|over_1_year|unknown",
               "open_issues_text": "verbatim open issues evidence or empty string",
               "open_issues_count": 0,
+              "readme_text": "verbatim README evidence or empty string",
+              "has_readme": false,
+              "ci_text": "verbatim CI/workflow evidence or empty string",
+              "has_ci": false,
+              "license_text": "verbatim license evidence or empty string",
+              "has_license": false,
               "confidence": "high|medium|low",
               "reasoning": "short rationale for extracted evidence"
             }}
@@ -122,6 +139,12 @@ class GitHealth(gl.Contract):
                     "commit_recency_bucket": "unknown",
                     "open_issues_text": "",
                     "open_issues_count": 0,
+                    "readme_text": "",
+                    "has_readme": False,
+                    "ci_text": "",
+                    "has_ci": False,
+                    "license_text": "",
+                    "has_license": False,
                     "confidence": "low",
                     "reasoning": "Extraction parse failed",
                 }
