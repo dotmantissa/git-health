@@ -127,12 +127,17 @@ class GitHealth(gl.Contract):
             """
 
             # 3. Execute Prompt
-            result_raw = gl.nondet.exec_prompt(task)
-            cleaned = result_raw.replace("```json", "").replace("```", "").strip()
-            print(f"LLM Extraction: {cleaned}")
+            result_raw = gl.nondet.exec_prompt(task, response_format="json")
+            print(f"LLM Extraction: {result_raw}")
 
             try:
-                extracted = json.loads(cleaned)
+                if isinstance(result_raw, dict):
+                    extracted = result_raw
+                else:
+                    cleaned = str(result_raw).replace("```json", "").replace(
+                        "```", ""
+                    ).strip()
+                    extracted = json.loads(cleaned)
             except Exception:
                 extracted = {
                     "last_commit_text": "",
@@ -169,14 +174,22 @@ class GitHealth(gl.Contract):
                 Repo Content Snippet:
                 {web_content[:6000]}
                 """
-                recency_raw = gl.nondet.exec_prompt(recency_task)
-                recency_cleaned = (
-                    recency_raw.replace("```json", "").replace("```", "").strip()
+                recency_raw = gl.nondet.exec_prompt(
+                    recency_task, response_format="json"
                 )
-                print(f"LLM Recency Extraction: {recency_cleaned}")
+                print(f"LLM Recency Extraction: {recency_raw}")
 
                 try:
-                    recency_extracted = json.loads(recency_cleaned)
+                    if isinstance(recency_raw, dict):
+                        recency_extracted = recency_raw
+                    else:
+                        recency_cleaned = (
+                            str(recency_raw)
+                            .replace("```json", "")
+                            .replace("```", "")
+                            .strip()
+                        )
+                        recency_extracted = json.loads(recency_cleaned)
                     if str(recency_extracted.get("last_commit_text", "")).strip():
                         extracted["last_commit_text"] = recency_extracted.get(
                             "last_commit_text", ""
