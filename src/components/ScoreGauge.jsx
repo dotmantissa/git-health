@@ -71,6 +71,12 @@ export default function ScoreGauge({ entry }) {
           <p className="score-time">Analyzed at {formatTime(entry.timestamp)}</p>
         </div>
       </div>
+      <details style={{ marginTop: '1rem' }}>
+        <summary>Fetched Contract Data (Debug)</summary>
+        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          {JSON.stringify(entry.details || {}, null, 2)}
+        </pre>
+      </details>
     </section>
   );
 }

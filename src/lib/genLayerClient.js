@@ -50,7 +50,12 @@ export async function analyzeRepo(accountAddress, repoUrl, onStatus) {
     args: [repoUrl]
   });
 
-  return Number(rawScore);
+  const details = await getDetails(accountAddress, repoUrl);
+
+  return {
+    score: Number(rawScore),
+    details
+  };
 }
 
 export async function getCachedScore(accountAddress, repoUrl) {
@@ -63,5 +68,27 @@ export async function getCachedScore(accountAddress, repoUrl) {
     args: [repoUrl]
   });
 
-  return Number(rawScore);
+  const details = await getDetails(accountAddress, repoUrl);
+
+  return {
+    score: Number(rawScore),
+    details
+  };
+}
+
+export async function getDetails(accountAddress, repoUrl) {
+  const client = buildGenLayerClient(accountAddress);
+
+  const raw = await client.readContract({
+    address: CONTRACT_ADDRESS,
+    abi: ABI,
+    functionName: 'get_details',
+    args: [repoUrl]
+  });
+
+  try {
+    return JSON.parse(String(raw || '{}'));
+  } catch {
+    return { parse_error: true, raw: String(raw || '') };
+  }
 }

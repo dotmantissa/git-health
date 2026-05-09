@@ -101,11 +101,12 @@ export default function App() {
       setLoading(true);
       setStatusMessage('Submitting transaction…');
 
-      const score = await analyzeRepo(address, repoUrl.trim(), setStatusMessage);
+      const { score, details } = await analyzeRepo(address, repoUrl.trim(), setStatusMessage);
 
       const entry = {
         url: repoUrl.trim(),
         score,
+        details,
         timestamp: new Date().toISOString()
       };
       pushHistory(entry);
@@ -138,10 +139,11 @@ export default function App() {
     try {
       setLoading(true);
       setStatusMessage('Reading result…');
-      const score = await getCachedScore(address, repoUrl.trim());
+      const { score, details } = await getCachedScore(address, repoUrl.trim());
       const entry = {
         url: repoUrl.trim(),
         score,
+        details,
         timestamp: new Date().toISOString()
       };
       pushHistory(entry);
