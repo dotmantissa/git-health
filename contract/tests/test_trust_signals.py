@@ -5,7 +5,7 @@ import json
 import git_health
 
 
-def _run_analysis(repo_payload: dict, readme_payload, workflows_payload) -> tuple[int, dict]:
+def _run_analysis(repo_payload: dict, commits_payload, readme_payload, workflows_payload) -> tuple[int, dict]:
     contract = git_health.GitHealth()
     contract.repo_scores = {}
     contract.repo_details = {}
@@ -14,10 +14,14 @@ def _run_analysis(repo_payload: dict, readme_payload, workflows_payload) -> tupl
         assert mode == "text"
         if url.endswith("/repos/example/repo"):
             return json.dumps(repo_payload)
+        if url.endswith("/repos/example/repo/commits?per_page=1"):
+            return json.dumps(commits_payload)
         if url.endswith("/repos/example/repo/readme"):
             return json.dumps(readme_payload)
         if url.endswith("/repos/example/repo/contents/.github/workflows"):
             return json.dumps(workflows_payload)
+        if "/repos/example/repo/contents/" in url:
+            return json.dumps({"message": "Not Found"})
         raise AssertionError(f"Unexpected URL: {url}")
 
     def fake_comparative(callback, _instruction: str) -> str:
@@ -33,14 +37,13 @@ def _run_analysis(repo_payload: dict, readme_payload, workflows_payload) -> tupl
 
 def test_trust_signals_all_present_no_penalty() -> None:
     repo = {
-        "pushed_at": "2999-01-01T00:00:00Z",
         "open_issues_count": 0,
-        "size": 100,
         "license": {"key": "mit"},
         "fork": False,
     }
     score, details = _run_analysis(
         repo_payload=repo,
+        commits_payload=[{"commit": {"committer": {"date": "2999-01-01T00:00:00Z"}}}],
         readme_payload={"name": "README.md"},
         workflows_payload=[{"name": "ci.yml"}],
     )
@@ -52,14 +55,13 @@ def test_trust_signals_all_present_no_penalty() -> None:
 
 def test_missing_single_trust_signal_deducts_five() -> None:
     repo = {
-        "pushed_at": "2999-01-01T00:00:00Z",
         "open_issues_count": 0,
-        "size": 100,
         "license": {"key": "mit"},
         "fork": False,
     }
     score, _ = _run_analysis(
         repo_payload=repo,
+        commits_payload=[{"commit": {"committer": {"date": "2999-01-01T00:00:00Z"}}}],
         readme_payload={"message": "Not Found"},
         workflows_payload=[{"name": "ci.yml"}],
     )
@@ -68,14 +70,13 @@ def test_missing_single_trust_signal_deducts_five() -> None:
 
 def test_missing_all_trust_signals_deducts_fifteen() -> None:
     repo = {
-        "pushed_at": "2999-01-01T00:00:00Z",
         "open_issues_count": 0,
-        "size": 100,
         "license": None,
         "fork": False,
     }
     score, _ = _run_analysis(
         repo_payload=repo,
+        commits_payload=[{"commit": {"committer": {"date": "2999-01-01T00:00:00Z"}}}],
         readme_payload={"message": "Not Found"},
         workflows_payload={"message": "Not Found"},
     )
@@ -84,14 +85,13 @@ def test_missing_all_trust_signals_deducts_fifteen() -> None:
 
 def test_trust_signal_penalties_stack_with_issue_penalty() -> None:
     repo = {
-        "pushed_at": "2999-01-01T00:00:00Z",
         "open_issues_count": 35,  # issue penalty = 3
-        "size": 100,
         "license": None,
         "fork": False,
     }
     score, details = _run_analysis(
         repo_payload=repo,
+        commits_payload=[{"commit": {"committer": {"date": "2999-01-01T00:00:00Z"}}}],
         readme_payload={"message": "Not Found"},
         workflows_payload={"message": "Not Found"},
     )

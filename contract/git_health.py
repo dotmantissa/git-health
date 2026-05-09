@@ -14,11 +14,11 @@ class GitHealth(gl.Contract):
     scraping the HTML page, which is JS-rendered and LLM-unreliable.
 
     Scoring breakdown (100 points total):
-      - Commit recency  : up to −65 pts  (based on days since last push)
-      - Empty repo      : −20 pts        (size == 0 KB on GitHub)
+      - Commit recency  : up to −65 pts  (days since last COMMIT, not push)
+      - Empty repo      : −20 pts        (zero commits → no history at all)
       - Open issues     : up to −20 pts  (1 pt per 10 open issues)
       - Missing README  : −5 pts
-      - Missing CI      : −5 pts
+      - Missing CI      : −5 pts         (GitHub Actions, Travis, Circle, Jenkins…)
       - Missing license : −5 pts
       - Fork            : −5 pts
     """
@@ -98,40 +98,42 @@ class GitHealth(gl.Contract):
 
         def compute_score(
             repo_info: dict,
+            last_commit_ts: str | None,
             has_readme: bool,
             has_ci: bool,
         ) -> tuple:
             score = 100
             breakdown: dict = {}
 
-            # 4a. Commit recency via `pushed_at`
-            pushed_at: str = repo_info.get("pushed_at") or ""
-            days = days_since(pushed_at)
-            breakdown["pushed_at"] = pushed_at
-            breakdown["days_since_last_push"] = days
+            # 4a. Commit recency via actual last commit date
+            # last_commit_ts is None when the repo has zero commits.
+            days = days_since(last_commit_ts) if last_commit_ts else None
+            breakdown["last_commit_ts"] = last_commit_ts or ""
+            breakdown["days_since_last_commit"] = days
 
-            if days is None:
-                recency_penalty = 25          # Unknown → pessimistic
-            elif days <= 30:
-                recency_penalty = 0           # Active
-            elif days <= 180:
-                recency_penalty = 15          # Slowing
-            elif days <= 365:
-                recency_penalty = 40          # Stale
-            else:
-                recency_penalty = 65          # Abandoned
+            is_empty = last_commit_ts is None  # no commits at all
+            breakdown["is_empty"] = is_empty
 
-            score -= recency_penalty
-            breakdown["recency_penalty"] = recency_penalty
-
-            # 4b. Empty repository (GitHub sets size=0 for bare/empty repos)
-            size_kb = max(0, int(repo_info.get("size") or 0))
-            breakdown["size_kb"] = size_kb
-            if size_kb == 0:
+            if is_empty:
+                # No commit history → maximum recency penalty + empty penalty
+                recency_penalty = 65
                 empty_penalty = 20
-                score -= empty_penalty
             else:
                 empty_penalty = 0
+                if days is None:
+                    recency_penalty = 25      # Timestamp unparseable → pessimistic
+                elif days <= 30:
+                    recency_penalty = 0       # Active
+                elif days <= 180:
+                    recency_penalty = 15      # Slowing
+                elif days <= 365:
+                    recency_penalty = 40      # Stale
+                else:
+                    recency_penalty = 65      # Abandoned
+
+            score -= recency_penalty
+            score -= empty_penalty
+            breakdown["recency_penalty"] = recency_penalty
             breakdown["empty_penalty"] = empty_penalty
 
             # 4c. Open issues
@@ -170,7 +172,7 @@ class GitHealth(gl.Contract):
             owner, repo = parse_github_url(repo_url)
             print(f"Analyzing {owner}/{repo} …")
 
-            # Core metadata: pushed_at, open_issues_count, license, size, fork
+            # Core metadata: open_issues_count, license, size, fork
             repo_info = fetch_api(f"repos/{owner}/{repo}")
             if not repo_info:
                 return json.dumps({
@@ -179,15 +181,66 @@ class GitHealth(gl.Contract):
                     "repo": repo_url,
                 })
 
-            # README presence (404 → None → has_readme=False)
+            # --- Last commit date -----------------------------------------
+            # `pushed_at` on the repo object reflects branch-force-pushes and
+            # non-commit events, making it unreliable for recency scoring.
+            # The commits endpoint returns the actual latest commit timestamp.
+            last_commit_ts = None
+            commits = fetch_api(f"repos/{owner}/{repo}/commits?per_page=1")
+            if isinstance(commits, list) and len(commits) > 0:
+                # Shape: [{ "commit": { "committer": { "date": "…" } } }]
+                try:
+                    last_commit_ts = (
+                        commits[0]["commit"]["committer"]["date"]
+                    )
+                except (KeyError, TypeError):
+                    try:
+                        last_commit_ts = (
+                            commits[0]["commit"]["author"]["date"]
+                        )
+                    except (KeyError, TypeError):
+                        last_commit_ts = None
+            # empty list → repo has no commits at all (last_commit_ts stays None)
+
+            # --- README presence ------------------------------------------
             readme = fetch_api(f"repos/{owner}/{repo}/readme")
             has_readme = isinstance(readme, dict) and "name" in readme
 
-            # CI presence: any file in .github/workflows/
-            workflows = fetch_api(f"repos/{owner}/{repo}/contents/.github/workflows")
-            has_ci = isinstance(workflows, list) and len(workflows) > 0
+            # --- CI presence (broad: GitHub Actions + major hosted CI) ----
+            # Check GitHub Actions workflows folder first (most common).
+            # Then fall back to well-known root-level CI config filenames.
+            # Any one hit is enough to mark CI as present.
+            CI_CONFIG_FILES = [
+                ".travis.yml",
+                ".circleci/config.yml",
+                "Jenkinsfile",
+                ".drone.yml",
+                "azure-pipelines.yml",
+                ".gitlab-ci.yml",
+                "bitbucket-pipelines.yml",
+                "Makefile",          # weak signal but counts as automation
+            ]
 
-            score, breakdown = compute_score(repo_info, has_readme, has_ci)
+            has_ci = False
+
+            workflows = fetch_api(
+                f"repos/{owner}/{repo}/contents/.github/workflows"
+            )
+            if isinstance(workflows, list) and len(workflows) > 0:
+                has_ci = True
+
+            if not has_ci:
+                for ci_file in CI_CONFIG_FILES:
+                    result = fetch_api(
+                        f"repos/{owner}/{repo}/contents/{ci_file}"
+                    )
+                    if isinstance(result, dict) and "name" in result:
+                        has_ci = True
+                        break
+
+            score, breakdown = compute_score(
+                repo_info, last_commit_ts, has_readme, has_ci
+            )
 
             breakdown["health_score"] = score
             breakdown["owner"] = owner

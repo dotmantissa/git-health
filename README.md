@@ -7,7 +7,7 @@
 - Contract now uses the GitHub REST API (`api.github.com`) instead of HTML scraping.
 - Added persisted JSON score breakdowns via `get_details(repo_url)`.
 - Frontend default contract address updated to:
-  - `0x3ace976ee3889Ef185848E49A940d7dBD595C872`
+  - `0xb79958B03F570D6636Ee87dc1BB1c996e27f002a`
 - Production frontend is deployed on Vercel at:
   - `https://git-health.vercel.app`
 
