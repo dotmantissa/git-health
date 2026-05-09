@@ -11,10 +11,8 @@ class GitHealth(gl.Contract):
     """
     Analyzes GitHub repositories and assigns a Health Score (0-100).
 
-    Data source: raw HTML of github.com/owner/repo (no API, no auth needed).
-    gl.nondet.web.get() is used exactly as shown in the official GenLayer
-    "Fetch GitHub Profile" example. The GitHub REST API was silently returning
-    403 (missing User-Agent) causing every score to be 0.
+    Data source: GitHub REST API first, with HTML fallback when API calls fail.
+    This avoids all-zero outcomes when one source is rate-limited or blocked.
 
     Scoring:
       Commit recency  up to -65 pts  (extracted from datetime= HTML attribute)
@@ -113,108 +111,189 @@ class GitHealth(gl.Contract):
         # ── parse BEFORE the nondet block (self not accessible inside) ──────
         owner, repo = parse_github_url(repo_url)
         page_url = f"https://github.com/{owner}/{repo}"
+        api_base = "https://api.github.com"
+        previous_score = int(self.repo_scores[repo_url]) if repo_url in self.repo_scores else 0
 
         # ── nondet block ────────────────────────────────────────────────────
         def get_repo_health() -> str:
             """
-            Fetch the repository HTML page using gl.nondet.web.get() —
-            the exact pattern from the official GenLayer "Fetch GitHub Profile"
-            example. No GitHub API, no authentication, no User-Agent issue.
-
-            All signals are extracted from server-rendered HTML with regex,
-            so there is no LLM involved and scoring is fully deterministic.
+            Primary path: GitHub REST API via gl.nondet.web.get().
+            Fallback path: parse server-rendered GitHub HTML when API fails.
+            This keeps scoring deterministic and resilient to partial outages.
             """
-            try:
-                resp = gl.nondet.web.get(page_url)
-            except Exception as exc:
-                return json.dumps({"health_score": 0,
-                                   "error": f"network error: {exc}",
-                                   "owner": owner, "repo": repo})
-
-            if resp.status_code == 404:
-                return json.dumps({"health_score": 0,
-                                   "error": "repository not found (404)",
-                                   "owner": owner, "repo": repo})
-            if resp.status_code >= 400:
-                return json.dumps({"health_score": 0,
-                                   "error": f"HTTP {resp.status_code}",
-                                   "owner": owner, "repo": repo})
-
-            html = resp.body.decode("utf-8", errors="replace")
-
-            # ── Empty repo ──────────────────────────────────────────────────
-            # GitHub shows a specific empty-state banner when no commits exist
-            is_empty = bool(re.search(
-                r"(This repository is empty|blankslate|no commits yet)",
-                html, re.IGNORECASE
-            ))
-
-            # ── Last commit timestamp ───────────────────────────────────────
-            # GitHub server-renders ISO timestamps in datetime= attributes on
-            # <relative-time> / <time-ago> / <time> elements. The FIRST one
-            # on the repo landing page is always the most recent commit date
-            # (shown in the commit summary row above the file table).
-            last_commit_ts = None
-            if not is_empty:
-                ts_match = re.search(
-                    r'datetime="(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)"',
-                    html
-                )
-                if ts_match:
-                    last_commit_ts = ts_match.group(1)
-
-            # ── Fork ────────────────────────────────────────────────────────
-            is_fork = bool(re.search(r"forked from", html, re.IGNORECASE))
-
-            # ── README ──────────────────────────────────────────────────────
-            # GitHub renders a README section heading and the file in the table
-            has_readme = bool(re.search(r"README", html))
-
-            # ── License ─────────────────────────────────────────────────────
-            # GitHub shows "View license" or a license sidebar widget
-            has_license = bool(re.search(
-                r"(View license|MIT License|Apache License|BSD License"
-                r"|GPL|LGPL|ISC License|Unlicense|license)",
-                html, re.IGNORECASE
-            ))
-
-            # ── Open issues ─────────────────────────────────────────────────
-            # GitHub puts the issue count in a <span class="Counter"> near
-            # the Issues tab. Pattern is stable across GitHub HTML versions.
-            open_issues = 0
-            issues_match = re.search(
-                r'Issues[^<]{0,200}?<span[^>]*class="[^"]*Counter[^"]*"[^>]*>'
-                r'\s*([\d,]+)\s*</span>',
-                html, re.DOTALL | re.IGNORECASE
-            )
-            if issues_match:
+            def http_get(url: str):
                 try:
-                    open_issues = int(issues_match.group(1).replace(",", ""))
-                except ValueError:
-                    open_issues = 0
+                    return gl.nondet.web.get(url)
+                except Exception as exc:
+                    print(f"GET failed for {url!r}: {exc}")
+                    return None
 
-            # ── CI ──────────────────────────────────────────────────────────
-            # Check for links/references to .github/workflows in the file tree,
-            # or well-known CI badge URLs that GitHub renders in the README.
-            has_ci = bool(re.search(
-                r"(\.github/workflows"
-                r"|travis-ci\.com|travis-ci\.org"
-                r"|circleci\.com"
-                r"|github\.com/[^/]+/[^/]+/actions"
-                r"|drone\.io"
-                r"|azure-pipelines)",
-                html, re.IGNORECASE
-            ))
+            def decode_body(resp) -> str:
+                if resp is None:
+                    return ""
+                try:
+                    return resp.body.decode("utf-8", errors="replace")
+                except Exception:
+                    return ""
 
-            data = {
-                "is_empty": is_empty,
-                "last_commit_ts": last_commit_ts,
-                "open_issues_count": open_issues,
-                "has_license": has_license,
-                "is_fork": is_fork,
-                "has_readme": has_readme,
-                "has_ci": has_ci,
-            }
+            def fetch_api(path: str):
+                resp = http_get(f"{api_base}/{path}")
+                if resp is None:
+                    return None, None
+                code = int(resp.status_code)
+                body = decode_body(resp)
+                if code == 409:
+                    return [], code
+                if code >= 400:
+                    return None, code
+                try:
+                    data = json.loads(body)
+                except json.JSONDecodeError:
+                    return None, code
+                if isinstance(data, dict) and "message" in data and "id" not in data:
+                    msg = str(data.get("message", ""))
+                    if "empty" in msg.lower():
+                        return [], code
+                    return None, code
+                return data, code
+
+            def parse_html_signals(html: str):
+                if not html:
+                    return None
+                is_empty_html = bool(re.search(
+                    r"(This repository is empty|blankslate|no commits yet)",
+                    html, re.IGNORECASE
+                ))
+                last_commit_html = None
+                if not is_empty_html:
+                    ts_match = re.search(
+                        r'datetime="(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)"',
+                        html
+                    )
+                    if ts_match:
+                        last_commit_html = ts_match.group(1)
+                issues = 0
+                issues_match = re.search(
+                    r'Issues[^<]{0,200}?<span[^>]*class="[^"]*Counter[^"]*"[^>]*>'
+                    r'\s*([\d,]+)\s*</span>',
+                    html, re.DOTALL | re.IGNORECASE
+                )
+                if issues_match:
+                    try:
+                        issues = int(issues_match.group(1).replace(",", ""))
+                    except ValueError:
+                        issues = 0
+                return {
+                    "is_empty": is_empty_html,
+                    "last_commit_ts": last_commit_html,
+                    "open_issues_count": issues,
+                    "has_license": bool(re.search(
+                        r"(View license|MIT License|Apache License|BSD License"
+                        r"|GPL|LGPL|ISC License|Unlicense|license)",
+                        html, re.IGNORECASE
+                    )),
+                    "is_fork": bool(re.search(r"forked from", html, re.IGNORECASE)),
+                    "has_readme": bool(re.search(r"README", html)),
+                    "has_ci": bool(re.search(
+                        r"(\.github/workflows"
+                        r"|travis-ci\.com|travis-ci\.org"
+                        r"|circleci\.com"
+                        r"|github\.com/[^/]+/[^/]+/actions"
+                        r"|drone\.io"
+                        r"|azure-pipelines)",
+                        html, re.IGNORECASE
+                    )),
+                }
+
+            # API-first path
+            repo_info, repo_code = fetch_api(f"repos/{owner}/{repo}")
+            if repo_code == 404:
+                return json.dumps({
+                    "health_score": 0,
+                    "error": "repository not found (404)",
+                    "owner": owner,
+                    "repo": repo,
+                })
+
+            api_data = None
+            if isinstance(repo_info, dict):
+                commits, _ = fetch_api(f"repos/{owner}/{repo}/commits?per_page=1")
+                readme, _ = fetch_api(f"repos/{owner}/{repo}/readme")
+                root, _ = fetch_api(f"repos/{owner}/{repo}/contents/")
+                workflows, _ = fetch_api(f"repos/{owner}/{repo}/contents/.github/workflows")
+
+                is_empty = commits == []
+                last_commit_ts = None
+                if isinstance(commits, list) and len(commits) > 0:
+                    try:
+                        last_commit_ts = commits[0]["commit"]["committer"]["date"]
+                    except (KeyError, TypeError):
+                        try:
+                            last_commit_ts = commits[0]["commit"]["author"]["date"]
+                        except (KeyError, TypeError):
+                            pass
+
+                ci_files = {
+                    ".travis.yml", ".drone.yml", "azure-pipelines.yml",
+                    ".gitlab-ci.yml", "bitbucket-pipelines.yml", "Jenkinsfile",
+                    "Makefile",
+                }
+                ci_dirs = {".circleci", ".github"}
+                has_ci = False
+                if isinstance(root, list):
+                    names = {str(item.get("name", "")) for item in root}
+                    has_ci = bool((names & ci_files) or (names & ci_dirs))
+                if not has_ci:
+                    has_ci = isinstance(workflows, list) and len(workflows) > 0
+
+                api_data = {
+                    "is_empty": is_empty,
+                    "last_commit_ts": last_commit_ts,
+                    "open_issues_count": repo_info.get("open_issues_count", 0),
+                    "has_license": repo_info.get("license") is not None,
+                    "is_fork": bool(repo_info.get("fork", False)),
+                    "has_readme": isinstance(readme, dict) and "name" in readme,
+                    "has_ci": has_ci,
+                }
+
+            # HTML fallback/augmentation path
+            html_resp = http_get(page_url)
+            html = decode_body(html_resp)
+            html_data = parse_html_signals(html)
+
+            if api_data is None and html_data is None:
+                return json.dumps({
+                    "health_score": previous_score,
+                    "error": "all data sources failed; returned cached score",
+                    "owner": owner,
+                    "repo": repo,
+                    "used_cached_score": True,
+                })
+
+            # Prefer API, fill gaps from HTML if API path is partially missing.
+            if api_data is None:
+                data = html_data
+            elif html_data is None:
+                data = api_data
+            else:
+                data = dict(api_data)
+                for key, value in html_data.items():
+                    if key not in data:
+                        data[key] = value
+                if not data.get("last_commit_ts") and html_data.get("last_commit_ts"):
+                    data["last_commit_ts"] = html_data["last_commit_ts"]
+                if not data.get("has_readme", False):
+                    data["has_readme"] = html_data.get("has_readme", False)
+                if not data.get("has_ci", False):
+                    data["has_ci"] = html_data.get("has_ci", False)
+                if not data.get("has_license", False):
+                    data["has_license"] = html_data.get("has_license", False)
+                if not data.get("is_fork", False):
+                    data["is_fork"] = html_data.get("is_fork", False)
+                if int(data.get("open_issues_count") or 0) == 0 and int(html_data.get("open_issues_count") or 0) > 0:
+                    data["open_issues_count"] = html_data["open_issues_count"]
+                if bool(data.get("is_empty")) and not html_data.get("is_empty", True):
+                    data["is_empty"] = False
 
             score, breakdown = compute_score(data)
             breakdown["owner"] = owner
