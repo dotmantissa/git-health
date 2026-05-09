@@ -38,6 +38,20 @@ def test_repo_not_found_returns_zero_and_error_payload() -> None:
     assert "error" in details
 
 
+def test_repo_not_found_html_marker_returns_zero() -> None:
+    html = """
+    <html>
+      <body>
+        <h1>Page not found</h1>
+      </body>
+    </html>
+    """
+    score, details = _run_with_html(html, status_code=200)
+    assert score == 0
+    assert details["health_score"] == 0
+    assert "not found" in details["error"]
+
+
 def test_empty_and_fork_penalties_are_applied() -> None:
     html = """
     <html>
