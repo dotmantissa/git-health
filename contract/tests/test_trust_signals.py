@@ -1,8 +1,19 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 import git_health
+
+
+@dataclass
+class _Resp:
+    status_code: int
+    body: bytes
+
+
+def _http(payload, status_code: int = 200) -> _Resp:
+    return _Resp(status_code=status_code, body=json.dumps(payload).encode("utf-8"))
 
 
 def _run_analysis(
@@ -16,24 +27,27 @@ def _run_analysis(
     contract.repo_scores = {}
     contract.repo_details = {}
 
-    def fake_render(url: str, mode: str = "text") -> str:
-        assert mode == "text"
+    def fake_get(url: str):
         if url.endswith("/repos/example/repo"):
-            return json.dumps(repo_payload)
+            return _http(repo_payload)
         if url.endswith("/repos/example/repo/commits?per_page=1"):
-            return json.dumps(commits_payload)
+            return _http(commits_payload)
         if url.endswith("/repos/example/repo/readme"):
-            return json.dumps(readme_payload)
+            if isinstance(readme_payload, dict) and "message" in readme_payload:
+                return _http(readme_payload, status_code=404)
+            return _http(readme_payload)
         if url.endswith("/repos/example/repo/contents/"):
-            return json.dumps(root_contents_payload)
+            return _http(root_contents_payload)
         if url.endswith("/repos/example/repo/contents/.github/workflows"):
-            return json.dumps(workflows_payload)
+            if isinstance(workflows_payload, dict) and "message" in workflows_payload:
+                return _http(workflows_payload, status_code=404)
+            return _http(workflows_payload)
         raise AssertionError(f"Unexpected URL: {url}")
 
     def fake_comparative(callback, _instruction: str) -> str:
         return callback()
 
-    git_health.gl.nondet.web.render = fake_render
+    git_health.gl.nondet.web.get = fake_get
     git_health.gl.eq_principle.prompt_comparative = fake_comparative
 
     score = contract.analyze_repo("https://github.com/example/repo")
