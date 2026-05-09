@@ -256,3 +256,37 @@ def test_url_normalization_supports_git_suffix_and_tree_paths() -> None:
 
     assert score == 100
     assert details["canonical_repo_url"] == "https://github.com/example/repo"
+
+
+def test_blank_repo_with_no_history_is_treated_as_empty() -> None:
+    repo_info = {
+        "open_issues_count": 0,
+        "license": None,
+        "fork": False,
+        "archived": False,
+        "disabled": False,
+        "pushed_at": "2999-01-01T00:00:00Z",
+        "size": 0,
+        "default_branch": "",
+    }
+
+    def router(url: str):
+        if "api.github.com/repos/example/blank/commits" in url:
+            return _make_json_response(200, [])
+        if "api.github.com/repos/example/blank/readme" in url:
+            return _make_json_response(404, {"message": "Not Found"})
+        if "api.github.com/repos/example/blank/contents/.github/workflows" in url:
+            return _make_json_response(404, {"message": "Not Found"})
+        if "api.github.com/repos/example/blank/contents/" in url:
+            return _make_json_response(404, {"message": "This repository is empty."})
+        if "api.github.com/repos/example/blank" in url:
+            return _make_json_response(200, repo_info)
+        if "https://github.com/example/blank" == url:
+            return _Resp(status_code=200, body=b"<html>This repository is empty</html>")
+        return _Resp(status_code=500, body=b"")
+
+    score, details = _run_with_router("https://github.com/example/blank", router)
+    assert details["is_empty"] is True
+    assert details["empty_penalty"] == 20
+    assert details["recency_penalty"] == 65
+    assert score == 0

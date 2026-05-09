@@ -322,7 +322,12 @@ class GitHealth(gl.Contract):
                 source_status["root_api_status"] = root_code
                 source_status["workflows_api_status"] = workflows_code
 
-                is_empty = commits_code == 409
+                repo_size = safe_int(repo_info.get("size"), 0)
+                default_branch = str(repo_info.get("default_branch") or "").strip()
+                commits_empty_list = isinstance(commits, list) and len(commits) == 0
+                is_empty = commits_code == 409 or (commits_empty_list and repo_size == 0)
+                if not default_branch and (commits_code in (200, 409, None)):
+                    is_empty = True
                 last_commit_ts = ""
                 if isinstance(commits, list) and commits:
                     first = commits[0] if isinstance(commits[0], dict) else {}
@@ -332,7 +337,7 @@ class GitHealth(gl.Contract):
                     last_commit_ts = str(committer.get("date") or author.get("date") or "")
 
                 pushed_at = str(repo_info.get("pushed_at") or "")
-                if not last_commit_ts and pushed_at:
+                if not last_commit_ts and pushed_at and not is_empty:
                     last_commit_ts = pushed_at
 
                 if is_empty and last_commit_ts:
