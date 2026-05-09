@@ -177,10 +177,6 @@ class GitHealth(gl.Contract):
             def parse_html_signals(html: str):
                 if not html:
                     return None
-                is_not_found_html = bool(re.search(
-                    r"(Page not found\s*·\s*GitHub|Repository not found|There isn[’']t a GitHub Pages site here)",
-                    html, re.IGNORECASE
-                ))
                 is_empty_html = bool(re.search(
                     r"(This repository is empty|blankslate|no commits yet)",
                     html, re.IGNORECASE
@@ -205,7 +201,6 @@ class GitHealth(gl.Contract):
                     except ValueError:
                         issues = 0
                 return {
-                    "is_not_found": is_not_found_html,
                     "is_empty": is_empty_html,
                     "last_commit_ts": last_commit_html,
                     "open_issues_count": issues,
@@ -290,13 +285,18 @@ class GitHealth(gl.Contract):
 
             # HTML fallback/augmentation path
             html_resp = http_get(page_url)
+            html_code = int(
+                getattr(html_resp, "status_code", None)
+                or getattr(html_resp, "status", None)
+                or 0
+            ) if html_resp is not None else 0
             html = decode_body(html_resp)
             html_data = parse_html_signals(html)
 
-            if html_data is not None and bool(html_data.get("is_not_found", False)):
+            if html_code == 404:
                 return json.dumps({
                     "health_score": 0,
-                    "error": "repository not found (html fallback)",
+                    "error": "repository not found (html status 404)",
                     "owner": owner,
                     "repo": repo,
                 })

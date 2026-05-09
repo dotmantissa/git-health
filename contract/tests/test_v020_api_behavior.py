@@ -38,7 +38,7 @@ def test_repo_not_found_returns_zero_and_error_payload() -> None:
     assert "error" in details
 
 
-def test_repo_not_found_html_marker_returns_zero() -> None:
+def test_repo_not_found_html_status_returns_zero() -> None:
     html = """
     <html>
       <head>
@@ -49,7 +49,7 @@ def test_repo_not_found_html_marker_returns_zero() -> None:
       </body>
     </html>
     """
-    score, details = _run_with_html(html, status_code=200)
+    score, details = _run_with_html(html, status_code=404)
     assert score == 0
     assert details["health_score"] == 0
     assert "not found" in details["error"]
