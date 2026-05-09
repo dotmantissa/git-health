@@ -9,13 +9,12 @@ def _run_with_payloads(
     repo_payload: dict,
     commits_payload,
     readme_payload,
+    root_contents_payload,
     workflows_payload,
-    ci_file_payloads: dict[str, object] | None = None,
 ) -> tuple[int, dict]:
     contract = git_health.GitHealth()
     contract.repo_scores = {}
     contract.repo_details = {}
-    ci_file_payloads = ci_file_payloads or {}
 
     def fake_render(url: str, mode: str = "text") -> str:
         assert mode == "text"
@@ -25,11 +24,10 @@ def _run_with_payloads(
             return json.dumps(commits_payload)
         if url.endswith("/repos/example/repo/readme"):
             return json.dumps(readme_payload)
+        if url.endswith("/repos/example/repo/contents/"):
+            return json.dumps(root_contents_payload)
         if url.endswith("/repos/example/repo/contents/.github/workflows"):
             return json.dumps(workflows_payload)
-        for path, payload in ci_file_payloads.items():
-            if url.endswith(path):
-                return json.dumps(payload)
         raise AssertionError(f"Unexpected URL: {url}")
 
     def fake_comparative(callback, _instruction: str) -> str:
@@ -79,6 +77,7 @@ def test_empty_and_fork_penalties_are_applied() -> None:
         repo_payload=repo,
         commits_payload=[],
         readme_payload={"name": "README.md"},
+        root_contents_payload=[],
         workflows_payload=[{"name": "ci.yml"}],
     )
 
@@ -98,14 +97,29 @@ def test_ci_fallback_file_counts_as_ci_present() -> None:
         repo_payload=repo,
         commits_payload=[{"commit": {"committer": {"date": "2999-01-01T00:00:00Z"}}}],
         readme_payload={"name": "README.md"},
+        root_contents_payload=[{"name": ".travis.yml"}],
         workflows_payload={"message": "Not Found"},
-        ci_file_payloads={
-            "/repos/example/repo/contents/.travis.yml": {"name": ".travis.yml"},
-        },
     )
 
     assert score == 100
     assert details["has_ci"] is True
+
+
+def test_empty_repo_message_on_commits_is_treated_as_zero_commits() -> None:
+    repo = {
+        "open_issues_count": 0,
+        "license": {"key": "mit"},
+        "fork": False,
+    }
+    score, details = _run_with_payloads(
+        repo_payload=repo,
+        commits_payload={"message": "Git Repository is empty."},
+        readme_payload={"name": "README.md"},
+        root_contents_payload=[{"name": ".github"}],
+        workflows_payload={"message": "Not Found"},
+    )
+    assert score == 15
+    assert details["is_empty"] is True
 
 
 def test_get_details_unknown_repo_returns_empty_json() -> None:

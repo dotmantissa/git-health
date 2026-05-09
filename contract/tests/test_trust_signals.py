@@ -5,7 +5,13 @@ import json
 import git_health
 
 
-def _run_analysis(repo_payload: dict, commits_payload, readme_payload, workflows_payload) -> tuple[int, dict]:
+def _run_analysis(
+    repo_payload: dict,
+    commits_payload,
+    readme_payload,
+    root_contents_payload,
+    workflows_payload,
+) -> tuple[int, dict]:
     contract = git_health.GitHealth()
     contract.repo_scores = {}
     contract.repo_details = {}
@@ -18,10 +24,10 @@ def _run_analysis(repo_payload: dict, commits_payload, readme_payload, workflows
             return json.dumps(commits_payload)
         if url.endswith("/repos/example/repo/readme"):
             return json.dumps(readme_payload)
+        if url.endswith("/repos/example/repo/contents/"):
+            return json.dumps(root_contents_payload)
         if url.endswith("/repos/example/repo/contents/.github/workflows"):
             return json.dumps(workflows_payload)
-        if "/repos/example/repo/contents/" in url:
-            return json.dumps({"message": "Not Found"})
         raise AssertionError(f"Unexpected URL: {url}")
 
     def fake_comparative(callback, _instruction: str) -> str:
@@ -45,6 +51,7 @@ def test_trust_signals_all_present_no_penalty() -> None:
         repo_payload=repo,
         commits_payload=[{"commit": {"committer": {"date": "2999-01-01T00:00:00Z"}}}],
         readme_payload={"name": "README.md"},
+        root_contents_payload=[{"name": ".github"}],
         workflows_payload=[{"name": "ci.yml"}],
     )
     assert score == 100
@@ -63,6 +70,7 @@ def test_missing_single_trust_signal_deducts_five() -> None:
         repo_payload=repo,
         commits_payload=[{"commit": {"committer": {"date": "2999-01-01T00:00:00Z"}}}],
         readme_payload={"message": "Not Found"},
+        root_contents_payload=[{"name": ".github"}],
         workflows_payload=[{"name": "ci.yml"}],
     )
     assert score == 95
@@ -78,6 +86,7 @@ def test_missing_all_trust_signals_deducts_fifteen() -> None:
         repo_payload=repo,
         commits_payload=[{"commit": {"committer": {"date": "2999-01-01T00:00:00Z"}}}],
         readme_payload={"message": "Not Found"},
+        root_contents_payload=[],
         workflows_payload={"message": "Not Found"},
     )
     assert score == 85
@@ -93,6 +102,7 @@ def test_trust_signal_penalties_stack_with_issue_penalty() -> None:
         repo_payload=repo,
         commits_payload=[{"commit": {"committer": {"date": "2999-01-01T00:00:00Z"}}}],
         readme_payload={"message": "Not Found"},
+        root_contents_payload=[],
         workflows_payload={"message": "Not Found"},
     )
     assert score == 82

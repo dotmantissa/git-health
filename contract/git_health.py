@@ -61,20 +61,61 @@ class GitHealth(gl.Contract):
         def fetch_api(path: str):
             """
             Call the GitHub REST API and return the decoded JSON object/list.
-            Returns None on any error (network, 404, parse, …).
+
+            gl.nondet.web.render in text mode is a page renderer, not a raw
+            HTTP client — it may wrap the JSON in whitespace, inject BOM chars,
+            or add surrounding HTML. We try two extraction strategies before
+            giving up.
+
+            Returns None on irrecoverable errors (network, 404, rate-limit).
+            A GitHub "Git Repository is empty." message on the commits endpoint
+            is returned as [] so callers can distinguish "no commits" from
+            "fetch failed".
             """
             url = f"https://api.github.com/{path}"
             try:
                 raw = gl.nondet.web.render(url, mode="text")
-                data = json.loads(raw)
-                # GitHub returns {"message": "Not Found"} for missing resources
-                if isinstance(data, dict) and "message" in data and "id" not in data:
-                    print(f"API {url!r} → {data.get('message')}")
-                    return None
-                return data
             except Exception as exc:
-                print(f"fetch_api({url!r}) failed: {exc}")
+                print(f"fetch_api({path!r}): render failed: {exc}")
                 return None
+
+            if not raw or not raw.strip():
+                print(f"fetch_api({path!r}): empty response")
+                return None
+
+            text = raw.strip()
+
+            # Strategy 1: direct parse (happy path)
+            data = None
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                pass
+
+            # Strategy 2: renderer wrapped JSON in HTML — find first JSON blob
+            if data is None:
+                match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', text)
+                if match:
+                    try:
+                        data = json.loads(match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+
+            if data is None:
+                print(f"fetch_api({path!r}): could not parse JSON. "
+                      f"Raw (first 200): {text[:200]!r}")
+                return None
+
+            # GitHub API error envelope: {"message": "..."}
+            if isinstance(data, dict) and "message" in data:
+                msg = data["message"]
+                print(f"fetch_api({path!r}): GitHub says: {msg!r}")
+                # Empty repo on commits endpoint → treat as empty list
+                if "empty" in msg.lower():
+                    return []
+                return None
+
+            return data
 
         # --- 3. Date utility ----------------------------------------------
 
@@ -207,36 +248,41 @@ class GitHealth(gl.Contract):
             has_readme = isinstance(readme, dict) and "name" in readme
 
             # --- CI presence (broad: GitHub Actions + major hosted CI) ----
-            # Check GitHub Actions workflows folder first (most common).
-            # Then fall back to well-known root-level CI config filenames.
-            # Any one hit is enough to mark CI as present.
-            CI_CONFIG_FILES = [
+            # Fetch the root file listing once (1 API call) and scan names.
+            # Then check .github/workflows separately (1 more call).
+            # This replaces the old 9-call per-file loop.
+            CI_ROOT_FILES = {
                 ".travis.yml",
-                ".circleci/config.yml",
-                "Jenkinsfile",
                 ".drone.yml",
                 "azure-pipelines.yml",
                 ".gitlab-ci.yml",
                 "bitbucket-pipelines.yml",
-                "Makefile",          # weak signal but counts as automation
-            ]
+                "Jenkinsfile",
+                "Makefile",
+            }
+            CI_ROOT_DIRS = {".circleci", ".github"}
 
             has_ci = False
 
-            workflows = fetch_api(
-                f"repos/{owner}/{repo}/contents/.github/workflows"
+            root_contents = fetch_api(
+                f"repos/{owner}/{repo}/contents/"
             )
-            if isinstance(workflows, list) and len(workflows) > 0:
-                has_ci = True
+            if isinstance(root_contents, list):
+                root_names = {
+                    str(item.get("name", "")) for item in root_contents
+                }
+                # Hit on a known CI file or directory
+                if root_names & CI_ROOT_FILES or root_names & CI_ROOT_DIRS:
+                    has_ci = True
 
+            # Only make the workflows sub-call if .github wasn't in root
+            # listing (saves one round-trip when .github is already detected).
             if not has_ci:
-                for ci_file in CI_CONFIG_FILES:
-                    result = fetch_api(
-                        f"repos/{owner}/{repo}/contents/{ci_file}"
-                    )
-                    if isinstance(result, dict) and "name" in result:
-                        has_ci = True
-                        break
+                workflows = fetch_api(
+                    f"repos/{owner}/{repo}/contents/.github/workflows"
+                )
+                if isinstance(workflows, list) and len(workflows) > 0:
+                    has_ci = True
 
             score, breakdown = compute_score(
                 repo_info, last_commit_ts, has_readme, has_ci
