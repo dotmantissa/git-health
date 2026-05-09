@@ -47,6 +47,13 @@ class _ContractAdapter:
             return self._instance.call("get_score", repo_url)
         raise AttributeError("Contract instance has no get_score or call")
 
+    def get_details(self, repo_url: Any) -> Any:
+        if hasattr(self._instance, "get_details"):
+            return self._instance.get_details(repo_url)
+        if hasattr(self._instance, "call"):
+            return self._instance.call("get_details", repo_url)
+        raise AttributeError("Contract instance has no get_details or call")
+
 
 @pytest.fixture(scope="session")
 def runner() -> Any:

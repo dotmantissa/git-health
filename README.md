@@ -45,7 +45,7 @@ npm run dev
 ### 3. Run the tests
 
 ```bash
-pytest -q contract/tests/test_trust_signals.py -v
+PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q contract/tests/test_trust_signals.py contract/tests/test_v020_api_behavior.py -v
 ```
 
 ### 4. Lint

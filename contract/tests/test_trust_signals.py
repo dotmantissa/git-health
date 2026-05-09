@@ -5,75 +5,96 @@ import json
 import git_health
 
 
-def _run_analysis(extracted_payload: dict) -> int:
+def _run_analysis(repo_payload: dict, readme_payload, workflows_payload) -> tuple[int, dict]:
     contract = git_health.GitHealth()
     contract.repo_scores = {}
+    contract.repo_details = {}
 
-    def fake_render(_repo_url: str, mode: str = "text") -> str:
+    def fake_render(url: str, mode: str = "text") -> str:
         assert mode == "text"
-        return "mock github page content"
-
-    def fake_exec_prompt(_task: str, response_format: str | None = None) -> str:
-        _ = response_format
-        return json.dumps(extracted_payload)
+        if url.endswith("/repos/example/repo"):
+            return json.dumps(repo_payload)
+        if url.endswith("/repos/example/repo/readme"):
+            return json.dumps(readme_payload)
+        if url.endswith("/repos/example/repo/contents/.github/workflows"):
+            return json.dumps(workflows_payload)
+        raise AssertionError(f"Unexpected URL: {url}")
 
     def fake_comparative(callback, _instruction: str) -> str:
         return callback()
 
     git_health.gl.nondet.web.render = fake_render
-    git_health.gl.nondet.exec_prompt = fake_exec_prompt
     git_health.gl.eq_principle.prompt_comparative = fake_comparative
 
-    return contract.analyze_repo("https://github.com/example/repo")
+    score = contract.analyze_repo("https://github.com/example/repo")
+    details = json.loads(contract.get_details("https://github.com/example/repo"))
+    return score, details
 
 
 def test_trust_signals_all_present_no_penalty() -> None:
-    payload = {
-        "last_commit_text": "committed 2 days ago",
-        "commit_recency_bucket": "within_1_month",
+    repo = {
+        "pushed_at": "2999-01-01T00:00:00Z",
         "open_issues_count": 0,
-        "has_readme": True,
-        "has_ci": True,
-        "has_license": True,
-        "confidence": "high",
+        "size": 100,
+        "license": {"key": "mit"},
+        "fork": False,
     }
-    assert _run_analysis(payload) == 100
+    score, details = _run_analysis(
+        repo_payload=repo,
+        readme_payload={"name": "README.md"},
+        workflows_payload=[{"name": "ci.yml"}],
+    )
+    assert score == 100
+    assert details["has_readme"] is True
+    assert details["has_ci"] is True
+    assert details["has_license"] is True
 
 
 def test_missing_single_trust_signal_deducts_five() -> None:
-    payload = {
-        "last_commit_text": "committed 2 days ago",
-        "commit_recency_bucket": "within_1_month",
+    repo = {
+        "pushed_at": "2999-01-01T00:00:00Z",
         "open_issues_count": 0,
-        "has_readme": False,
-        "has_ci": True,
-        "has_license": True,
-        "confidence": "high",
+        "size": 100,
+        "license": {"key": "mit"},
+        "fork": False,
     }
-    assert _run_analysis(payload) == 95
+    score, _ = _run_analysis(
+        repo_payload=repo,
+        readme_payload={"message": "Not Found"},
+        workflows_payload=[{"name": "ci.yml"}],
+    )
+    assert score == 95
 
 
 def test_missing_all_trust_signals_deducts_fifteen() -> None:
-    payload = {
-        "last_commit_text": "committed 2 days ago",
-        "commit_recency_bucket": "within_1_month",
+    repo = {
+        "pushed_at": "2999-01-01T00:00:00Z",
         "open_issues_count": 0,
-        "has_readme": False,
-        "has_ci": False,
-        "has_license": False,
-        "confidence": "high",
+        "size": 100,
+        "license": None,
+        "fork": False,
     }
-    assert _run_analysis(payload) == 85
+    score, _ = _run_analysis(
+        repo_payload=repo,
+        readme_payload={"message": "Not Found"},
+        workflows_payload={"message": "Not Found"},
+    )
+    assert score == 85
 
 
 def test_trust_signal_penalties_stack_with_issue_penalty() -> None:
-    payload = {
-        "last_commit_text": "committed 2 days ago",
-        "commit_recency_bucket": "within_1_month",
+    repo = {
+        "pushed_at": "2999-01-01T00:00:00Z",
         "open_issues_count": 35,  # issue penalty = 3
-        "has_readme": False,
-        "has_ci": False,
-        "has_license": False,
-        "confidence": "high",
+        "size": 100,
+        "license": None,
+        "fork": False,
     }
-    assert _run_analysis(payload) == 82
+    score, details = _run_analysis(
+        repo_payload=repo,
+        readme_payload={"message": "Not Found"},
+        workflows_payload={"message": "Not Found"},
+    )
+    assert score == 82
+    assert details["issue_penalty"] == 3
+    assert details["health_score"] == 82
