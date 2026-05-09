@@ -1,87 +1,120 @@
 # git-health
 
-> On-chain GitHub repository health scoring via GenLayer intelligent contracts and validator consensus.
+On-chain GitHub repository health scoring via GenLayer intelligent contracts and validator consensus.
 
-## What changed recently
+## Current Architecture
 
-- Contract now uses the GitHub REST API (`api.github.com`) instead of HTML scraping.
-- Added persisted JSON score breakdowns via `get_details(repo_url)`.
-- Frontend default contract address updated to:
-  - `0x208cC9c6B211292014cda30ad08cd158D1777FD4`
-- Production frontend is deployed on Vercel at:
-  - `https://git-health.vercel.app`
+- `contract/git_health.py`: GenLayer intelligent contract that computes and stores health scores.
+- `src/`: React + Vite frontend for wallet connection, analyze transactions, cached reads, and score history.
+- `contract/tests/`: Contract unit tests covering scoring, trust signals, bounds, and v0.2.0 API behavior.
 
-## Repository structure (current)
+## Deployed Frontend
 
-| Directory | Purpose |
-|-----------|---------|
-| `contract/` | GenLayer intelligent contract (`git_health.py`) + pytest tests |
-| `src/` | React + Vite dApp — wallet UX + contract calls |
-| `.github/workflows/` | CI: lint, test, and build on every push |
-| `.env.example` | Frontend environment template (`VITE_CONTRACT_ADDRESS`, chain, RPC) |
+- Production URL: `https://git-health.vercel.app`
 
-## Prerequisites
+## How The dApp Works
 
-- Python 3.11+ (recommended for full GenLayer SDK compatibility)
-- Node.js 20+
-- GenLayer Studio running locally on `http://localhost:4000`
-- MetaMask (or compatible EIP-1193 wallet)
+1. User connects wallet (MetaMask-compatible) on GenLayer Studio network (`chainId = 61999`).
+2. User submits a GitHub repo URL to `analyze_repo(repo_url)`.
+3. Contract fetches repository signals from GitHub:
+- Primary source: GitHub REST API (`api.github.com`)
+- Fallback/augmentation source: GitHub repo HTML page parsing
+4. Each validator returns a JSON breakdown including `health_score`.
+5. Consensus accepts results only when all validator `health_score` values are within 5 points.
+6. If accepted, the most conservative value (lowest score) is selected.
+7. Contract stores both:
+- `repo_scores[repo_url]` (numeric score)
+- `repo_details[repo_url]` (full JSON breakdown)
+8. Frontend reads results via `get_score` and `get_details`.
 
-## Quickstart
+## Contract Logic (v0.2.0)
 
-### 1. Deploy the contract
+### Data collection behavior
 
-Use GenLayer Studio CLI or Studio UI to deploy `contract/git_health.py`, then copy the deployed contract address.
+- Parses `owner/repo` from GitHub URL.
+- Uses GitHub API first (`/repos/{owner}/{repo}`, commits, readme, contents, workflows).
+- Uses HTML parsing as fallback and to fill missing signals.
+- If API and HTML both fail, returns previous cached score with error metadata:
+  - `"used_cached_score": true`
 
-### 2. Run the frontend
+### Scoring model
+
+Score starts at `100`, then deductions are applied:
+
+- Commit recency:
+- Unknown date: `-25`
+- `<= 30 days`: `-0`
+- `31-180 days`: `-15`
+- `181-365 days`: `-40`
+- `> 365 days`: `-65`
+- Empty repo: `-20` and recency penalty treated as `-65`
+- Open issues: `min(20, open_issues_count // 10)`
+- Missing trust signals:
+- No README: `-5`
+- No CI/workflows: `-5`
+- No license: `-5`
+- Forked repo: `-5`
+
+Guardrails:
+- Final score is clamped to `[0, 100]`.
+- `get_score(repo_url)` returns cached score or `0` if never analyzed.
+- `get_details(repo_url)` returns the last JSON breakdown or `{}` if none exists.
+
+## Frontend Behavior
+
+- Network-gated to GenLayer Studio (`chainId 61999`, hex `0xF22F`).
+- Contract calls use `genlayer-js` with `studionet`.
+- Analyze flow:
+- Submits `analyze_repo` transaction.
+- Waits for `FINALIZED` receipt.
+- Verifies execution success from leader/validator execution status.
+- On success, reads and displays `get_score` + `get_details`.
+- On execution failure, attempts `debugTraceTransaction` for diagnostics.
+- Cached read flow:
+- Calls `get_score` + `get_details` without submitting a tx.
+- UI keeps per-session history of analyzed/read entries.
+
+## Configuration
+
+`.env.example`:
+
+```env
+VITE_CONTRACT_ADDRESS=0x208cC9c6B211292014cda30ad08cd158D1777FD4
+VITE_CHAIN_ID=61999
+VITE_RPC_URL=http://localhost:4000/api
+```
+
+Address resolution behavior:
+- Uses `VITE_CONTRACT_ADDRESS` when set and non-zero.
+- Falls back to `src/constants.js` default address when missing/zero.
+
+## Local Development
+
+Prerequisites:
+- Python `3.11+`
+- Node.js `20+`
+- GenLayer Studio running locally (`http://localhost:4000`)
+- MetaMask or compatible EIP-1193 wallet
+
+Install and run frontend:
 
 ```bash
 cp .env.example .env
-# Set VITE_CONTRACT_ADDRESS in .env to your deployed contract address
 npm install
 npm run dev
 ```
 
-### 3. Run the tests
+## Contract Tests
+
+Run all contract tests:
 
 ```bash
-PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q contract/tests/test_trust_signals.py contract/tests/test_v020_api_behavior.py -v
+PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q contract/tests -v
 ```
 
-### 4. Lint
+## Linting
 
 ```bash
 ruff check contract/git_health.py contract/tests/
 ruff format --check contract/git_health.py contract/tests/
 ```
-
-## Contract scoring model (`contract/git_health.py`)
-
-Score starts at `100`, then deductions are applied:
-
-- Commit recency:
-  - unknown: `-25`
-  - `<= 30` days: `-0`
-  - `31–180` days: `-15`
-  - `181–365` days: `-40`
-  - `> 365` days: `-65`
-- Empty repository (`size == 0`): `-20`
-- Open issues: `min(20, open_issues_count // 10)`
-- Trust signals:
-  - missing README: `-5`
-  - missing CI/workflow: `-5`
-  - missing license: `-5`
-- Fork repository: `-5`
-
-Guardrails:
-- Score is clamped to `[0, 100]`
-- Consensus accepts validator results only when all `health_score` values are within 5 points, choosing the lower score when in-range.
-
-## Environment variable behavior
-
-- Frontend uses `VITE_CONTRACT_ADDRESS` when set.
-- If that env var is empty or `0x0000000000000000000000000000000000000000`, it falls back to the default in `src/constants.js`.
-
-## Network
-
-This app is strictly locked to GenLayer Studio (Chain ID 61999). It will not function on any other network.
