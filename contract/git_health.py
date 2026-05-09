@@ -234,12 +234,15 @@ class GitHealth(gl.Contract):
 
             api_data = None
             if isinstance(repo_info, dict):
-                commits, _ = fetch_api(f"repos/{owner}/{repo}/commits?per_page=1")
+                commits, commits_code = fetch_api(f"repos/{owner}/{repo}/commits?per_page=1")
                 readme, _ = fetch_api(f"repos/{owner}/{repo}/readme")
                 root, _ = fetch_api(f"repos/{owner}/{repo}/contents/")
                 workflows, _ = fetch_api(f"repos/{owner}/{repo}/contents/.github/workflows")
 
-                is_empty = commits == []
+                # Treat empty repos conservatively:
+                # - definitive empty signal is GitHub's 409 on commits endpoint
+                # - a bare [] without 409 is treated as uncertain (not empty)
+                is_empty = (commits_code == 409)
                 last_commit_ts = None
                 if isinstance(commits, list) and len(commits) > 0:
                     try:
@@ -249,6 +252,13 @@ class GitHealth(gl.Contract):
                             last_commit_ts = commits[0]["commit"]["author"]["date"]
                         except (KeyError, TypeError):
                             pass
+                # Non-empty evidence from metadata overrides accidental empty flags.
+                if is_empty:
+                    pushed_at = repo_info.get("pushed_at")
+                    if pushed_at:
+                        is_empty = False
+                        if not last_commit_ts:
+                            last_commit_ts = str(pushed_at)
 
                 ci_files = {
                     ".travis.yml", ".drone.yml", "azure-pipelines.yml",
@@ -310,6 +320,8 @@ class GitHealth(gl.Contract):
                 if int(data.get("open_issues_count") or 0) == 0 and int(html_data.get("open_issues_count") or 0) > 0:
                     data["open_issues_count"] = html_data["open_issues_count"]
                 if bool(data.get("is_empty")) and not html_data.get("is_empty", True):
+                    data["is_empty"] = False
+                if data.get("is_empty") and data.get("last_commit_ts"):
                     data["is_empty"] = False
 
             score, breakdown = compute_score(data)
