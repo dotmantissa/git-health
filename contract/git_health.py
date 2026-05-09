@@ -132,7 +132,20 @@ class GitHealth(gl.Contract):
                 if resp is None:
                     return ""
                 try:
-                    return resp.body.decode("utf-8", errors="replace")
+                    raw = getattr(resp, "body", None)
+                    if isinstance(raw, bytes):
+                        return raw.decode("utf-8", errors="replace")
+                    if isinstance(raw, str):
+                        return raw
+                    text = getattr(resp, "text", None)
+                    if isinstance(text, str):
+                        return text
+                    data = getattr(resp, "data", None)
+                    if isinstance(data, bytes):
+                        return data.decode("utf-8", errors="replace")
+                    if isinstance(data, str):
+                        return data
+                    return ""
                 except Exception:
                     return ""
 
@@ -140,7 +153,11 @@ class GitHealth(gl.Contract):
                 resp = http_get(f"{api_base}/{path}")
                 if resp is None:
                     return None, None
-                code = int(resp.status_code)
+                code = int(
+                    getattr(resp, "status_code", None)
+                    or getattr(resp, "status", None)
+                    or 0
+                )
                 body = decode_body(resp)
                 if code == 409:
                     return [], code
