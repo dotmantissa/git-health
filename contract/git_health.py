@@ -178,7 +178,7 @@ class GitHealth(gl.Contract):
                 if not html:
                     return None
                 is_not_found_html = bool(re.search(
-                    r"(Page not found|Repository not found|404)",
+                    r"(Page not found\s*·\s*GitHub|Repository not found|There isn[’']t a GitHub Pages site here)",
                     html, re.IGNORECASE
                 ))
                 is_empty_html = bool(re.search(

@@ -41,6 +41,9 @@ def test_repo_not_found_returns_zero_and_error_payload() -> None:
 def test_repo_not_found_html_marker_returns_zero() -> None:
     html = """
     <html>
+      <head>
+        <title>Page not found · GitHub</title>
+      </head>
       <body>
         <h1>Page not found</h1>
       </body>
@@ -84,6 +87,27 @@ def test_ci_detection_from_workflow_markers() -> None:
     score, details = _run_with_html(html)
     assert score == 100
     assert details["has_ci"] is True
+
+
+def test_regular_repo_html_not_misclassified_as_not_found() -> None:
+    html = """
+    <html>
+      <head>
+        <title>example/repo</title>
+      </head>
+      <body>
+        README
+        View license
+        <relative-time datetime="2999-01-01T00:00:00Z"></relative-time>
+        .github/workflows
+        Build artifacts reference id 4042
+      </body>
+    </html>
+    """
+    score, details = _run_with_html(html, status_code=200)
+    assert score == 100
+    assert details["health_score"] == 100
+    assert "error" not in details
 
 
 def test_get_details_unknown_repo_returns_empty_json() -> None:
