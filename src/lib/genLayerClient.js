@@ -42,8 +42,19 @@ export async function analyzeRepo(accountAddress, repoUrl, onStatus) {
     throw new Error('Transaction did not finalize within the timeout window.');
   }
 
-  const execResult = receipt.txExecutionResultName;
-  if (execResult !== ExecutionResult.FINISHED_WITH_RETURN) {
+  const topLevelExec = receipt?.txExecutionResultName;
+  const leaderExec = receipt?.consensus_data?.leader_receipt?.[0]?.execution_result;
+  const validatorExecs = (receipt?.consensus_data?.validators || [])
+    .map((v) => v?.execution_result)
+    .filter(Boolean);
+  const allValidatorsSuccess =
+    validatorExecs.length > 0 && validatorExecs.every((v) => v === 'SUCCESS');
+  const executionSucceeded =
+    topLevelExec === ExecutionResult.FINISHED_WITH_RETURN ||
+    leaderExec === 'SUCCESS' ||
+    allValidatorsSuccess;
+
+  if (!executionSucceeded) {
     let debugTrace = null;
     try {
       debugTrace = await client.debugTraceTransaction({ hash: txHash, round: 0 });
@@ -51,7 +62,7 @@ export async function analyzeRepo(accountAddress, repoUrl, onStatus) {
       // Best effort only.
     }
     const error = new Error(
-      `Contract execution failed: ${execResult || 'unknown'}`
+      `Contract execution failed: ${topLevelExec || leaderExec || 'unknown'}`
     );
     error.name = 'ContractExecutionError';
     error.meta = { txHash, receipt, debugTrace };
