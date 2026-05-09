@@ -11,12 +11,17 @@ class GitHealth(gl.Contract):
     """
     Analyzes GitHub repositories and assigns a Health Score (0-100).
 
+    Data source: raw HTML of github.com/owner/repo (no API, no auth needed).
+    gl.nondet.web.get() is used exactly as shown in the official GenLayer
+    "Fetch GitHub Profile" example. The GitHub REST API was silently returning
+    403 (missing User-Agent) causing every score to be 0.
+
     Scoring:
-      Commit recency  up to -65 pts  (days since last actual commit)
+      Commit recency  up to -65 pts  (extracted from datetime= HTML attribute)
       Empty repo           -20 pts   (zero commits)
-      Open issues     up to -20 pts  (1 pt per 10 open issues, max 20)
+      Open issues     up to -20 pts  (1 pt per 10, max 20)
       No README             -5 pts
-      No CI                 -5 pts   (Actions, Travis, Circle, Drone, etc.)
+      No CI                 -5 pts
       No license            -5 pts
       Fork                  -5 pts
     """
@@ -30,7 +35,7 @@ class GitHealth(gl.Contract):
     @gl.public.write
     def analyze_repo(self, repo_url: str) -> int:
 
-        # ── helpers (deterministic, defined outside the nondet block) ──────
+        # ── deterministic helpers ───────────────────────────────────────────
 
         def parse_github_url(url: str) -> tuple:
             url = url.strip().rstrip("/")
@@ -62,11 +67,12 @@ class GitHealth(gl.Contract):
             bk["last_commit_ts"] = last_commit_ts
 
             if is_empty:
-                recency_penalty, empty_penalty = 65, 20
+                recency_penalty = 65
+                empty_penalty = 20
                 bk["days_since_last_commit"] = None
             else:
                 empty_penalty = 0
-                days = days_since(last_commit_ts)
+                days = days_since(last_commit_ts) if last_commit_ts else None
                 bk["days_since_last_commit"] = days
                 if days is None:
                     recency_penalty = 25
@@ -89,11 +95,7 @@ class GitHealth(gl.Contract):
             bk["open_issues"] = open_issues
             bk["issue_penalty"] = issue_penalty
 
-            for key, penalty in [
-                ("has_readme", 5),
-                ("has_ci", 5),
-                ("has_license", 5),
-            ]:
+            for key, penalty in [("has_readme", 5), ("has_ci", 5), ("has_license", 5)]:
                 val = bool(d.get(key, False))
                 bk[key] = val
                 if not val:
@@ -108,114 +110,110 @@ class GitHealth(gl.Contract):
             bk["health_score"] = score
             return score, bk
 
-        # ── parse owner/repo BEFORE the nondet block ────────────────────────
-        # self is accessible here; it is NOT accessible inside get_repo_health
+        # ── parse BEFORE the nondet block (self not accessible inside) ──────
         owner, repo = parse_github_url(repo_url)
+        page_url = f"https://github.com/{owner}/{repo}"
 
-        # ── nondet block: each validator runs this independently ────────────
+        # ── nondet block ────────────────────────────────────────────────────
         def get_repo_health() -> str:
             """
-            Uses gl.nondet.web.get() — the correct raw HTTP client.
-            gl.nondet.web.render() is a JS page renderer and must NOT be
-            used for JSON API endpoints; it returns mangled HTML, not bytes.
+            Fetch the repository HTML page using gl.nondet.web.get() —
+            the exact pattern from the official GenLayer "Fetch GitHub Profile"
+            example. No GitHub API, no authentication, no User-Agent issue.
+
+            All signals are extracted from server-rendered HTML with regex,
+            so there is no LLM involved and scoring is fully deterministic.
             """
+            try:
+                resp = gl.nondet.web.get(page_url)
+            except Exception as exc:
+                return json.dumps({"health_score": 0,
+                                   "error": f"network error: {exc}",
+                                   "owner": owner, "repo": repo})
 
-            CI_FILES = {
-                ".travis.yml", ".drone.yml", "azure-pipelines.yml",
-                ".gitlab-ci.yml", "bitbucket-pipelines.yml",
-                "Jenkinsfile", "Makefile",
-            }
-            CI_DIRS = {".circleci", ".github"}
+            if resp.status_code == 404:
+                return json.dumps({"health_score": 0,
+                                   "error": "repository not found (404)",
+                                   "owner": owner, "repo": repo})
+            if resp.status_code >= 400:
+                return json.dumps({"health_score": 0,
+                                   "error": f"HTTP {resp.status_code}",
+                                   "owner": owner, "repo": repo})
 
-            def fetch(path: str):
-                """
-                Raw HTTP GET against the GitHub REST API.
-                Returns parsed JSON (dict or list), [] for empty repos,
-                or None on error / not-found.
-                """
-                url = f"https://api.github.com/{path}"
-                try:
-                    resp = gl.nondet.web.get(url)
-                except Exception as exc:
-                    print(f"fetch({path!r}): network error: {exc}")
-                    return None
+            html = resp.body.decode("utf-8", errors="replace")
 
-                body = resp.body.decode("utf-8")
+            # ── Empty repo ──────────────────────────────────────────────────
+            # GitHub shows a specific empty-state banner when no commits exist
+            is_empty = bool(re.search(
+                r"(This repository is empty|blankslate|no commits yet)",
+                html, re.IGNORECASE
+            ))
 
-                # 409 Conflict = "Git Repository is empty."
-                if resp.status_code == 409:
-                    return []
-
-                if resp.status_code >= 400:
-                    print(f"fetch({path!r}): HTTP {resp.status_code} — {body[:120]}")
-                    return None
-
-                try:
-                    data = json.loads(body)
-                except json.JSONDecodeError as exc:
-                    print(f"fetch({path!r}): JSON parse error: {exc} — {body[:120]}")
-                    return None
-
-                # GitHub error envelope: {"message": "Not Found", ...}
-                if isinstance(data, dict) and "message" in data and "id" not in data:
-                    msg = data["message"]
-                    print(f"fetch({path!r}): GitHub error: {msg!r}")
-                    if "empty" in msg.lower():
-                        return []
-                    return None
-
-                return data
-
-            # 1. Core repo metadata
-            repo_info = fetch(f"repos/{owner}/{repo}")
-            if not isinstance(repo_info, dict):
-                return json.dumps({
-                    "health_score": 0,
-                    "error": "repo metadata fetch failed",
-                    "owner": owner,
-                    "repo": repo,
-                })
-
-            # 2. Last commit timestamp
-            # NOTE: pushed_at on the repo object updates on any branch event,
-            # not just commits. We fetch /commits?per_page=1 for accuracy.
-            is_empty = False
+            # ── Last commit timestamp ───────────────────────────────────────
+            # GitHub server-renders ISO timestamps in datetime= attributes on
+            # <relative-time> / <time-ago> / <time> elements. The FIRST one
+            # on the repo landing page is always the most recent commit date
+            # (shown in the commit summary row above the file table).
             last_commit_ts = None
-            commits = fetch(f"repos/{owner}/{repo}/commits?per_page=1")
-            if commits == []:
-                is_empty = True
-            elif isinstance(commits, list) and len(commits) > 0:
+            if not is_empty:
+                ts_match = re.search(
+                    r'datetime="(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)"',
+                    html
+                )
+                if ts_match:
+                    last_commit_ts = ts_match.group(1)
+
+            # ── Fork ────────────────────────────────────────────────────────
+            is_fork = bool(re.search(r"forked from", html, re.IGNORECASE))
+
+            # ── README ──────────────────────────────────────────────────────
+            # GitHub renders a README section heading and the file in the table
+            has_readme = bool(re.search(r"README", html))
+
+            # ── License ─────────────────────────────────────────────────────
+            # GitHub shows "View license" or a license sidebar widget
+            has_license = bool(re.search(
+                r"(View license|MIT License|Apache License|BSD License"
+                r"|GPL|LGPL|ISC License|Unlicense|license)",
+                html, re.IGNORECASE
+            ))
+
+            # ── Open issues ─────────────────────────────────────────────────
+            # GitHub puts the issue count in a <span class="Counter"> near
+            # the Issues tab. Pattern is stable across GitHub HTML versions.
+            open_issues = 0
+            issues_match = re.search(
+                r'Issues[^<]{0,200}?<span[^>]*class="[^"]*Counter[^"]*"[^>]*>'
+                r'\s*([\d,]+)\s*</span>',
+                html, re.DOTALL | re.IGNORECASE
+            )
+            if issues_match:
                 try:
-                    last_commit_ts = commits[0]["commit"]["committer"]["date"]
-                except (KeyError, TypeError):
-                    try:
-                        last_commit_ts = commits[0]["commit"]["author"]["date"]
-                    except (KeyError, TypeError):
-                        pass
+                    open_issues = int(issues_match.group(1).replace(",", ""))
+                except ValueError:
+                    open_issues = 0
 
-            # 3. README
-            readme = fetch(f"repos/{owner}/{repo}/readme")
-            has_readme = isinstance(readme, dict) and "name" in readme
-
-            # 4. CI detection — one root listing call, one workflows call
-            #    (avoids the old 9-call per-filename loop)
-            has_ci = False
-            root = fetch(f"repos/{owner}/{repo}/contents/")
-            if isinstance(root, list):
-                names = {str(item.get("name", "")) for item in root}
-                has_ci = bool((names & CI_FILES) or (names & CI_DIRS))
-            if not has_ci:
-                wf = fetch(f"repos/{owner}/{repo}/contents/.github/workflows")
-                has_ci = isinstance(wf, list) and len(wf) > 0
+            # ── CI ──────────────────────────────────────────────────────────
+            # Check for links/references to .github/workflows in the file tree,
+            # or well-known CI badge URLs that GitHub renders in the README.
+            has_ci = bool(re.search(
+                r"(\.github/workflows"
+                r"|travis-ci\.com|travis-ci\.org"
+                r"|circleci\.com"
+                r"|github\.com/[^/]+/[^/]+/actions"
+                r"|drone\.io"
+                r"|azure-pipelines)",
+                html, re.IGNORECASE
+            ))
 
             data = {
-                "is_empty":          is_empty,
-                "last_commit_ts":    last_commit_ts,
-                "open_issues_count": repo_info.get("open_issues_count", 0),
-                "has_license":       repo_info.get("license") is not None,
-                "is_fork":           bool(repo_info.get("fork", False)),
-                "has_readme":        has_readme,
-                "has_ci":            has_ci,
+                "is_empty": is_empty,
+                "last_commit_ts": last_commit_ts,
+                "open_issues_count": open_issues,
+                "has_license": has_license,
+                "is_fork": is_fork,
+                "has_readme": has_readme,
+                "has_ci": has_ci,
             }
 
             score, breakdown = compute_score(data)
@@ -224,18 +222,18 @@ class GitHealth(gl.Contract):
             print(f"Score {owner}/{repo}: {score} | {json.dumps(breakdown)}")
             return json.dumps(breakdown)
 
-        # ── consensus: all validators must agree within 5 points ───────────
+        # ── multi-validator consensus ────────────────────────────────────────
         final_json_str = gl.eq_principle.prompt_comparative(
             get_repo_health,
             """
-            Compare the 'health_score' integer in each validator result.
-            Accept when all scores differ by at most 5 points.
-            When within tolerance, select the result with the lowest score
-            (most conservative estimate).
+            Compare the 'health_score' integer across all validator results.
+            Accept the result if all scores differ by at most 5 points.
+            When within tolerance, prefer the result with the lowest score
+            (most conservative estimate wins).
             """,
         )
 
-        # ── persist ────────────────────────────────────────────────────────
+        # ── persist ─────────────────────────────────────────────────────────
         parsed = json.loads(final_json_str)
         score = int(parsed["health_score"])
         self.repo_scores[repo_url] = u256(score)
@@ -244,7 +242,7 @@ class GitHealth(gl.Contract):
 
     @gl.public.view
     def get_score(self, repo_url: str) -> int:
-        """Return the last cached health score, or 0 if never analyzed."""
+        """Return the cached health score, or 0 if not yet analyzed."""
         if repo_url in self.repo_scores:
             return int(self.repo_scores[repo_url])
         return 0
