@@ -111,7 +111,6 @@ class GitHealth(gl.Contract):
         # ── parse BEFORE the nondet block (self not accessible inside) ──────
         owner, repo = parse_github_url(repo_url)
         page_url = f"https://github.com/{owner}/{repo}"
-        commits_page_url = f"https://github.com/{owner}/{repo}/commits"
         api_base = "https://api.github.com"
         previous_score = int(self.repo_scores[repo_url]) if repo_url in self.repo_scores else 0
 
@@ -223,25 +222,6 @@ class GitHealth(gl.Contract):
                     )),
                 }
 
-            def parse_commits_page_signals(html: str):
-                if not html:
-                    return None
-                is_empty_html = bool(re.search(
-                    r"(This repository is empty|blankslate|no commits yet)",
-                    html, re.IGNORECASE
-                ))
-                last_commit_html = None
-                ts_match = re.search(
-                    r'datetime="(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)"',
-                    html
-                )
-                if ts_match:
-                    last_commit_html = ts_match.group(1)
-                return {
-                    "is_empty": is_empty_html,
-                    "last_commit_ts": last_commit_html,
-                }
-
             # API-first path
             repo_info, repo_code = fetch_api(f"repos/{owner}/{repo}")
             if repo_code == 404:
@@ -307,9 +287,6 @@ class GitHealth(gl.Contract):
             html_resp = http_get(page_url)
             html = decode_body(html_resp)
             html_data = parse_html_signals(html)
-            commits_html_resp = http_get(commits_page_url)
-            commits_html = decode_body(commits_html_resp)
-            commits_html_data = parse_commits_page_signals(commits_html)
 
             if api_data is None and html_data is None:
                 return json.dumps({
@@ -332,12 +309,6 @@ class GitHealth(gl.Contract):
                         data[key] = value
                 if not data.get("last_commit_ts") and html_data.get("last_commit_ts"):
                     data["last_commit_ts"] = html_data["last_commit_ts"]
-                if (
-                    not data.get("last_commit_ts")
-                    and commits_html_data is not None
-                    and commits_html_data.get("last_commit_ts")
-                ):
-                    data["last_commit_ts"] = commits_html_data["last_commit_ts"]
                 if not data.get("has_readme", False):
                     data["has_readme"] = html_data.get("has_readme", False)
                 if not data.get("has_ci", False):
@@ -349,12 +320,6 @@ class GitHealth(gl.Contract):
                 if int(data.get("open_issues_count") or 0) == 0 and int(html_data.get("open_issues_count") or 0) > 0:
                     data["open_issues_count"] = html_data["open_issues_count"]
                 if bool(data.get("is_empty")) and not html_data.get("is_empty", True):
-                    data["is_empty"] = False
-                if (
-                    bool(data.get("is_empty"))
-                    and commits_html_data is not None
-                    and not commits_html_data.get("is_empty", True)
-                ):
                     data["is_empty"] = False
                 if data.get("is_empty") and data.get("last_commit_ts"):
                     data["is_empty"] = False
