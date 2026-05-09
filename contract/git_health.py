@@ -2,66 +2,151 @@
 # { "Depends": "py-genlayer:latest" }
 
 import json
-
+import re
+from datetime import datetime, timezone
 from genlayer import *
 
 
 class GitHealth(gl.Contract):
     """
-    Analyzes GitHub repositories to assign a "Health Score" (0-100) based on
-    maintenance activity visible on the main page.
+    Analyzes GitHub repositories to assign a Health Score (0–100).
+    Uses the GitHub REST API for structured, reliable data instead of
+    scraping the HTML page, which is JS-rendered and LLM-unreliable.
+
+    Scoring breakdown (100 points total):
+      - Commit recency  : up to −65 pts  (based on days since last push)
+      - Empty repo      : −20 pts        (size == 0 KB on GitHub)
+      - Open issues     : up to −20 pts  (1 pt per 10 open issues)
+      - Missing README  : −5 pts
+      - Missing CI      : −5 pts
+      - Missing license : −5 pts
+      - Fork            : −5 pts
     """
 
-    # Maps Repository URL (str) -> Health Score (u256)
+    # repo URL → health score
     repo_scores: TreeMap[str, u256]
+    # repo URL → JSON breakdown (for transparency / debugging)
+    repo_details: TreeMap[str, str]
 
     def __init__(self):
         pass
 
+    # ------------------------------------------------------------------ #
+    #  Helpers (defined inside analyze_repo so they close over nothing)   #
+    # ------------------------------------------------------------------ #
+
     @gl.public.write
     def analyze_repo(self, repo_url: str) -> int:
         """
-        Scrapes a GitHub repository, calculates a health score based on recent
-        commits and open issues, and updates the state.
+        Fetches real repository data from the GitHub API, computes a health
+        score, runs multi-validator consensus, and persists the result.
         """
 
-        def compute_score(parsed: dict) -> int:
-            score = 100
+        # --- 1. URL parser ------------------------------------------------
 
-            last_commit_text = str(parsed.get("last_commit_text", "")).strip().lower()
-            recency_bucket = str(parsed.get("commit_recency_bucket", "")).strip().lower()
-            confidence = str(parsed.get("confidence", "")).strip().lower()
-            issues_count_raw = parsed.get("open_issues_count", 0)
-            has_readme = bool(parsed.get("has_readme", False))
-            has_ci = bool(parsed.get("has_ci", False))
-            has_license = bool(parsed.get("has_license", False))
+        def parse_github_url(url: str) -> tuple:
+            """Return (owner, repo) from any github.com URL."""
+            url = url.strip().rstrip("/")
+            match = re.search(r"github\.com/([^/\s]+)/([^/\s#?]+)", url)
+            if not match:
+                raise ValueError(f"Cannot parse GitHub URL: {url!r}")
+            owner = match.group(1)
+            repo = match.group(2)
+            if repo.endswith(".git"):
+                repo = repo[:-4]
+            return owner, repo
 
-            # Penalize uncertainty by default if commit recency is missing or ambiguous.
-            if not last_commit_text or recency_bucket not in {
-                "within_1_month",
-                "over_1_month",
-                "over_6_months",
-                "over_1_year",
-            }:
-                score -= 10
-            elif recency_bucket == "over_1_month":
-                score -= 10
-            elif recency_bucket == "over_6_months":
-                score -= 40
-            elif recency_bucket == "over_1_year":
-                score -= 60
+        # --- 2. API fetch -------------------------------------------------
 
+        def fetch_api(path: str):
+            """
+            Call the GitHub REST API and return the decoded JSON object/list.
+            Returns None on any error (network, 404, parse, …).
+            """
+            url = f"https://api.github.com/{path}"
             try:
-                issues_count = int(issues_count_raw)
-            except Exception:
-                issues_count = 0
+                raw = gl.nondet.web.render(url, mode="text")
+                data = json.loads(raw)
+                # GitHub returns {"message": "Not Found"} for missing resources
+                if isinstance(data, dict) and "message" in data and "id" not in data:
+                    print(f"API {url!r} → {data.get('message')}")
+                    return None
+                return data
+            except Exception as exc:
+                print(f"fetch_api({url!r}) failed: {exc}")
+                return None
 
-            if issues_count < 0:
-                issues_count = 0
-            issue_deduction = min(20, issues_count // 10)
-            score -= issue_deduction
+        # --- 3. Date utility ----------------------------------------------
 
-            # Penalize missing repository trust signals.
+        def days_since(iso_ts: str) -> int | None:
+            """
+            Parse a GitHub ISO-8601 timestamp ("2024-01-15T10:30:00Z")
+            and return the number of whole days elapsed since then.
+            Returns None when the timestamp is absent or unparseable.
+            """
+            if not iso_ts:
+                return None
+            try:
+                dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                return max(0, (now - dt).days)
+            except Exception as exc:
+                print(f"days_since({iso_ts!r}) parse error: {exc}")
+                return None
+
+        # --- 4. Score computation (purely deterministic) ------------------
+
+        def compute_score(
+            repo_info: dict,
+            has_readme: bool,
+            has_ci: bool,
+        ) -> tuple:
+            score = 100
+            breakdown: dict = {}
+
+            # 4a. Commit recency via `pushed_at`
+            pushed_at: str = repo_info.get("pushed_at") or ""
+            days = days_since(pushed_at)
+            breakdown["pushed_at"] = pushed_at
+            breakdown["days_since_last_push"] = days
+
+            if days is None:
+                recency_penalty = 25          # Unknown → pessimistic
+            elif days <= 30:
+                recency_penalty = 0           # Active
+            elif days <= 180:
+                recency_penalty = 15          # Slowing
+            elif days <= 365:
+                recency_penalty = 40          # Stale
+            else:
+                recency_penalty = 65          # Abandoned
+
+            score -= recency_penalty
+            breakdown["recency_penalty"] = recency_penalty
+
+            # 4b. Empty repository (GitHub sets size=0 for bare/empty repos)
+            size_kb = max(0, int(repo_info.get("size") or 0))
+            breakdown["size_kb"] = size_kb
+            if size_kb == 0:
+                empty_penalty = 20
+                score -= empty_penalty
+            else:
+                empty_penalty = 0
+            breakdown["empty_penalty"] = empty_penalty
+
+            # 4c. Open issues
+            open_issues = max(0, int(repo_info.get("open_issues_count") or 0))
+            issue_penalty = min(20, open_issues // 10)
+            score -= issue_penalty
+            breakdown["open_issues"] = open_issues
+            breakdown["issue_penalty"] = issue_penalty
+
+            # 4d. Trust signals
+            has_license = repo_info.get("license") is not None
+            breakdown["has_readme"] = has_readme
+            breakdown["has_ci"] = has_ci
+            breakdown["has_license"] = has_license
+
             if not has_readme:
                 score -= 5
             if not has_ci:
@@ -69,175 +154,87 @@ class GitHealth(gl.Contract):
             if not has_license:
                 score -= 5
 
-            if score < 0:
-                score = 0
+            # 4e. Fork discount (forks inherit activity they didn't generate)
+            is_fork: bool = bool(repo_info.get("fork", False))
+            breakdown["is_fork"] = is_fork
+            if is_fork:
+                score -= 5
 
-            # Require explicit commit evidence for a perfect score.
-            if score == 100 and not last_commit_text:
-                score = 90
+            score = max(0, min(100, score))
+            breakdown["final_score"] = score
+            return score, breakdown
 
-            # Low confidence prevents optimistic high scoring.
-            if confidence == "low" and score > 90:
-                score = 90
+        # --- 5. Non-deterministic fetch + score (run by each validator) ---
 
-            return score
+        def get_repo_health() -> str:
+            owner, repo = parse_github_url(repo_url)
+            print(f"Analyzing {owner}/{repo} …")
 
-        def get_repo_health():
-            # 1. Fetch the repo page
-            try:
-                print(f"Fetching {repo_url}...")
-                web_content = gl.nondet.web.render(repo_url, mode="text")
-            except Exception as e:
-                print(f"Fetch failed: {e}")
-                # Return a valid JSON structure even on failure so the parser doesn't break
-                return json.dumps({"health_score": 0, "reasoning": "Fetch failed"})
+            # Core metadata: pushed_at, open_issues_count, license, size, fork
+            repo_info = fetch_api(f"repos/{owner}/{repo}")
+            if not repo_info:
+                return json.dumps({
+                    "health_score": 0,
+                    "error": "Repository not found or API unreachable",
+                    "repo": repo_url,
+                })
 
-            # 2. LLM Analysis Task
-            task = f"""
-            You are a Code Repository Auditor.
-            Extract structured evidence from this GitHub page text.
+            # README presence (404 → None → has_readme=False)
+            readme = fetch_api(f"repos/{owner}/{repo}/readme")
+            has_readme = isinstance(readme, dict) and "name" in readme
 
-            Rules:
-            - Only use information explicitly visible in the provided text.
-            - If a field is missing or ambiguous, return empty text and low confidence.
-            - Do not infer hidden values.
-            - Prefer explicit recency snippets like:
-              "committed X days ago", "updated on Month Day, Year",
-              "Latest commit", "last commit".
-            - For open issues, prefer visible tab counts near "Issues".
+            # CI presence: any file in .github/workflows/
+            workflows = fetch_api(f"repos/{owner}/{repo}/contents/.github/workflows")
+            has_ci = isinstance(workflows, list) and len(workflows) > 0
 
-            Return ONLY valid JSON with this exact schema:
-            {{
-              "last_commit_text": "verbatim commit recency evidence or empty string",
-              "commit_recency_bucket": "within_1_month|over_1_month|over_6_months|over_1_year|unknown",
-              "open_issues_text": "verbatim open issues evidence or empty string",
-              "open_issues_count": 0,
-              "readme_text": "verbatim README evidence or empty string",
-              "has_readme": false,
-              "ci_text": "verbatim CI/workflow evidence or empty string",
-              "has_ci": false,
-              "license_text": "verbatim license evidence or empty string",
-              "has_license": false,
-              "confidence": "high|medium|low",
-              "reasoning": "short rationale for extracted evidence"
-            }}
+            score, breakdown = compute_score(repo_info, has_readme, has_ci)
 
-            Repo Content Snippet:
-            {web_content[:6000]}
-            """
+            breakdown["health_score"] = score
+            breakdown["owner"] = owner
+            breakdown["repo"] = repo
 
-            # 3. Execute Prompt
-            result_raw = gl.nondet.exec_prompt(task, response_format="json")
-            print(f"LLM Extraction: {result_raw}")
+            print(f"Score for {owner}/{repo}: {score}")
+            print(f"Breakdown: {json.dumps(breakdown)}")
+            return json.dumps(breakdown)
 
-            try:
-                if isinstance(result_raw, dict):
-                    extracted = result_raw
-                else:
-                    cleaned = str(result_raw).replace("```json", "").replace(
-                        "```", ""
-                    ).strip()
-                    extracted = json.loads(cleaned)
-            except Exception:
-                extracted = {
-                    "last_commit_text": "",
-                    "commit_recency_bucket": "unknown",
-                    "open_issues_text": "",
-                    "open_issues_count": 0,
-                    "readme_text": "",
-                    "has_readme": False,
-                    "ci_text": "",
-                    "has_ci": False,
-                    "license_text": "",
-                    "has_license": False,
-                    "confidence": "low",
-                    "reasoning": "Extraction parse failed",
-                }
+        # --- 6. Multi-validator consensus ---------------------------------
 
-            # Focused second pass for commit recency when initial extraction is weak.
-            if (
-                not str(extracted.get("last_commit_text", "")).strip()
-                or str(extracted.get("commit_recency_bucket", "")).strip().lower()
-                == "unknown"
-            ):
-                recency_task = f"""
-                Extract ONLY commit recency evidence from this GitHub page text.
-                Use exact visible phrasing where possible.
-
-                Return ONLY valid JSON:
-                {{
-                  "last_commit_text": "verbatim recency phrase or empty string",
-                  "commit_recency_bucket": "within_1_month|over_1_month|over_6_months|over_1_year|unknown",
-                  "confidence": "high|medium|low"
-                }}
-
-                Repo Content Snippet:
-                {web_content[:6000]}
-                """
-                recency_raw = gl.nondet.exec_prompt(
-                    recency_task, response_format="json"
-                )
-                print(f"LLM Recency Extraction: {recency_raw}")
-
-                try:
-                    if isinstance(recency_raw, dict):
-                        recency_extracted = recency_raw
-                    else:
-                        recency_cleaned = (
-                            str(recency_raw)
-                            .replace("```json", "")
-                            .replace("```", "")
-                            .strip()
-                        )
-                        recency_extracted = json.loads(recency_cleaned)
-                    if str(recency_extracted.get("last_commit_text", "")).strip():
-                        extracted["last_commit_text"] = recency_extracted.get(
-                            "last_commit_text", ""
-                        )
-                    if str(recency_extracted.get("commit_recency_bucket", "")).strip():
-                        extracted["commit_recency_bucket"] = recency_extracted.get(
-                            "commit_recency_bucket", "unknown"
-                        )
-                    # Keep the lower confidence between passes.
-                    existing_conf = str(extracted.get("confidence", "low")).lower()
-                    second_conf = str(recency_extracted.get("confidence", "low")).lower()
-                    if existing_conf == "low" or second_conf == "low":
-                        extracted["confidence"] = "low"
-                    elif existing_conf == "medium" or second_conf == "medium":
-                        extracted["confidence"] = "medium"
-                    else:
-                        extracted["confidence"] = "high"
-                except Exception:
-                    pass
-
-            score = compute_score(extracted)
-            extracted["health_score"] = score
-            extracted["evidence_missing"] = not bool(
-                str(extracted.get("last_commit_text", "")).strip()
-            )
-            return json.dumps(extracted)
-
-        # 4. Comparative Consensus
-        # FIX: Passed as a positional argument (removed 'criteria=')
         consensus_instruction = """
-        Compare the 'health_score' values in the JSON results.
-        They must be effectively equal, defined as being within a difference of 5 points.
-        (e.g. 80 and 85 are valid matches. 80 and 86 are not).
+        Compare the 'health_score' integer values across all validator results.
+        Accept the result if all scores differ by at most 5 points
+        (e.g. 74 and 79 → accept; 74 and 80 → reject).
+        When scores differ within tolerance, prefer the result with the
+        lower (more conservative) health_score.
         """
 
         final_json_str = gl.eq_principle.prompt_comparative(
-            get_repo_health, consensus_instruction
+            get_repo_health,
+            consensus_instruction,
         )
 
-        # 5. Parse and Store
+        # --- 7. Persist ---------------------------------------------------
+
         parsed = json.loads(final_json_str)
         score = int(parsed["health_score"])
 
         self.repo_scores[repo_url] = u256(score)
+        self.repo_details[repo_url] = final_json_str
         return score
+
+    # ------------------------------------------------------------------ #
+    #  Read-only views                                                     #
+    # ------------------------------------------------------------------ #
 
     @gl.public.view
     def get_score(self, repo_url: str) -> int:
+        """Return the cached health score, or 0 if not yet analyzed."""
         if repo_url in self.repo_scores:
             return int(self.repo_scores[repo_url])
         return 0
+
+    @gl.public.view
+    def get_details(self, repo_url: str) -> str:
+        """Return the full JSON breakdown from the last analysis."""
+        if repo_url in self.repo_details:
+            return self.repo_details[repo_url]
+        return "{}"

@@ -1,6 +1,6 @@
 const ENV_CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS;
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-const DEFAULT_CONTRACT_ADDRESS = '0xD9d8E22211b4943cd7ea05F68af8B28c72966eAF';
+const DEFAULT_CONTRACT_ADDRESS = '0x3ace976ee3889Ef185848E49A940d7dBD595C872';
 
 export const CONTRACT_ADDRESS =
   ENV_CONTRACT_ADDRESS && ENV_CONTRACT_ADDRESS !== ZERO_ADDRESS
@@ -27,5 +27,12 @@ export const ABI = [
     stateMutability: 'view',
     inputs: [{ name: 'repo_url', type: 'string' }],
     outputs: [{ name: '', type: 'int256' }]
+  },
+  {
+    name: 'get_details',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'repo_url', type: 'string' }],
+    outputs: [{ name: '', type: 'string' }]
   }
 ];

@@ -1,17 +1,13 @@
 # git-health
 
-> On-chain GitHub repository health scoring via GenLayer intelligent contracts and LLM consensus.
+> On-chain GitHub repository health scoring via GenLayer intelligent contracts and validator consensus.
 
 ## What changed recently
 
-- Contract scoring now includes trust signals from the GitHub repo page:
-  - `README` presence
-  - CI/workflow presence
-  - License presence
-- Contract LLM calls now request JSON output explicitly (`response_format="json"`) and handle both dict and JSON-string responses.
-- Added deterministic tests for trust-signal scoring in `contract/tests/test_trust_signals.py`.
+- Contract now uses the GitHub REST API (`api.github.com`) instead of HTML scraping.
+- Added persisted JSON score breakdowns via `get_details(repo_url)`.
 - Frontend default contract address updated to:
-  - `0xD9d8E22211b4943cd7ea05F68af8B28c72966eAF`
+  - `0x3ace976ee3889Ef185848E49A940d7dBD595C872`
 - Production frontend is deployed on Vercel at:
   - `https://git-health.vercel.app`
 
@@ -64,20 +60,22 @@ ruff format --check contract/git_health.py contract/tests/
 Score starts at `100`, then deductions are applied:
 
 - Commit recency:
-  - missing/unknown: `-10`
-  - over 1 month: `-10`
-  - over 6 months: `-40`
-  - over 1 year: `-60`
+  - unknown: `-25`
+  - `<= 30` days: `-0`
+  - `31–180` days: `-15`
+  - `181–365` days: `-40`
+  - `> 365` days: `-65`
+- Empty repository (`size == 0`): `-20`
 - Open issues: `min(20, open_issues_count // 10)`
 - Trust signals:
   - missing README: `-5`
   - missing CI/workflow: `-5`
   - missing license: `-5`
+- Fork repository: `-5`
 
 Guardrails:
 - Score is clamped to `[0, 100]`
-- Low-confidence extraction caps optimistic high scores
-- A second LLM pass is used when commit recency extraction is weak/unknown
+- Consensus accepts validator results only when all `health_score` values are within 5 points, choosing the lower score when in-range.
 
 ## Environment variable behavior
 
