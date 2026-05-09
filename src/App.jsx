@@ -101,18 +101,45 @@ export default function App() {
       setLoading(true);
       setStatusMessage('Submitting transaction…');
 
-      const { score, details } = await analyzeRepo(address, repoUrl.trim(), setStatusMessage);
+      const { score, details, txHash, receipt } = await analyzeRepo(
+        address,
+        repoUrl.trim(),
+        setStatusMessage
+      );
 
       const entry = {
         url: repoUrl.trim(),
         score,
         details,
+        txHash,
+        receipt,
         timestamp: new Date().toISOString()
       };
       pushHistory(entry);
     } catch (error) {
       if (error?.code === 4001 || error?.code === 'ACTION_REJECTED') {
         setInlineError('Transaction rejected.');
+      } else if (error?.name === 'ContractExecutionError') {
+        const meta = error?.meta || {};
+        setInlineError(
+          truncateError(
+            `${error.message}. tx: ${meta.txHash || 'unknown'}`
+          )
+        );
+        const entry = {
+          url: repoUrl.trim(),
+          score: 0,
+          details: {
+            error: error.message,
+            txHash: meta.txHash,
+            receipt: meta.receipt,
+            debugTrace: meta.debugTrace
+          },
+          txHash: meta.txHash,
+          receipt: meta.receipt,
+          timestamp: new Date().toISOString()
+        };
+        pushHistory(entry);
       } else {
         setInlineError(truncateError(error?.message || 'Transaction failed.'));
       }
