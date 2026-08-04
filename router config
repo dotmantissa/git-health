@@ -1,0 +1,19 @@
+cat >> ~/.bashrc << 'EOF'
+
+rotateAPI() {
+  if [ -z "$1" ]; then
+    echo "Usage: rotateAPI <api_key>"
+    return 1
+  fi
+
+  export ANTHROPIC_AUTH_TOKEN="$1"
+  export ANTHROPIC_BASE_URL="https://agentrouter.org"
+  export ANTHROPIC_MODEL="claude-opus-4-8"
+
+  echo "AgentRouter env vars set:"
+  echo "  ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL"
+  echo "  ANTHROPIC_MODEL=$ANTHROPIC_MODEL"
+  echo "  ANTHROPIC_AUTH_TOKEN=<hidden, ${#1} chars>"
+}
+EOF
+source ~/.bashrc
